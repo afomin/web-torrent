@@ -1,0 +1,11 @@
+# Caddy gets and renews a Let's Encrypt certificate for $DOMAIN automatically.
+{$DOMAIN} {
+	reverse_proxy 127.0.0.1:3000 {
+		# stream large downloads / video without buffering
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

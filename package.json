@@ -1,0 +1,25 @@
+{
+  "name": "web-torrent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted torrent downloader with a web UI: download torrents on a server, then grab files over HTTPS",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "hash-password": "node scripts/hash-password.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "express": "^5.2.1",
+    "parse-torrent": "^11.0.24",
+    "webtorrent": "^3.0.21"
+  },
+  "devDependencies": {
+    "bittorrent-tracker": "^11.2.3"
+  }
+}

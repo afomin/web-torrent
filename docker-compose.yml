@@ -1,0 +1,35 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    # Host networking: BitTorrent needs its port reachable directly, and the app only
+    # listens on 127.0.0.1:3000 — the outside world reaches it through Caddy (HTTPS).
+    network_mode: host
+    env_file: .env
+    environment:
+      HOST: 127.0.0.1
+      PORT: 3000
+      DATA_DIR: /data
+      DOWNLOADS_DIR: /downloads
+      SECURE_COOKIES: "true"
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+    stop_grace_period: 20s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:
+  caddy_config:

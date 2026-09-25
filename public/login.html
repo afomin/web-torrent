@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Вход — Web Torrent</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card" id="login-form" autocomplete="on">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>
+      </div>
+      <h1>Web Torrent</h1>
+      <p>Войдите, чтобы продолжить</p>
+      <label for="username">Логин</label>
+      <input class="input" id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Пароль</label>
+      <input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="btn primary" type="submit" id="submit">Войти</button>
+      <div class="form-error" id="error" role="alert"></div>
+    </form>
+  </div>
+  <script src="/login.js"></script>
+</body>
+</html>

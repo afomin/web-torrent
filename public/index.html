@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Web Torrent</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <div class="brand">
+        <div class="logo sm">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 20h14"/></svg>
+        </div>
+        <span>Web Torrent</span>
+      </div>
+      <div class="top-stats">
+        <div class="speed" title="Общая скорость">
+          <span class="down" id="total-down">↓ 0 B/s</span>
+          <span class="up" id="total-up">↑ 0 B/s</span>
+        </div>
+        <div class="disk" title="Место на диске">
+          <span id="disk-text">—</span>
+          <div class="disk-bar" id="disk-bar"><div></div></div>
+        </div>
+      </div>
+      <button class="icon-btn" id="logout" title="Выйти" aria-label="Выйти">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="container">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="downloads" role="tab">Загрузки <span class="badge hidden" id="active-count">0</span></button>
+      <button class="tab" data-tab="files" role="tab">Файлы</button>
+    </nav>
+
+    <section id="view-downloads">
+      <div class="card add-card">
+        <form class="add-row" id="add-form">
+          <input class="input" id="magnet" placeholder="Вставьте magnet-ссылку или ссылку на .torrent" autocomplete="off" spellcheck="false">
+          <button class="btn primary" type="submit" id="add-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Добавить
+          </button>
+        </form>
+        <div class="drop-hint">
+          <span>или перетащите .torrent-файл в окно, или</span>
+          <button class="link-btn" type="button" id="pick-file">выберите файл</button>
+          <input type="file" id="file-input" accept=".torrent,application/x-bittorrent" multiple hidden>
+        </div>
+      </div>
+
+      <div class="section-title"><span>Активные</span></div>
+      <div class="list" id="torrent-list"></div>
+
+      <div id="history-section" class="hidden">
+        <div class="section-title">
+          <span>Завершённые</span>
+          <button class="btn ghost" id="clear-history">Очистить список</button>
+        </div>
+        <div class="list" id="history-list"></div>
+      </div>
+    </section>
+
+    <section id="view-files" class="hidden">
+      <div class="files-toolbar">
+        <div class="crumbs" id="crumbs"></div>
+        <button class="btn" id="download-folder" title="Скачать папку одним zip-архивом">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+          Скачать всё (zip)
+        </button>
+        <button class="icon-btn" id="refresh-files" title="Обновить" aria-label="Обновить">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5"/></svg>
+        </button>
+      </div>
+      <div class="card file-list" id="file-list"></div>
+    </section>
+  </main>
+
+  <div class="drop-overlay hidden" id="drop-overlay">Отпустите, чтобы добавить торрент</div>
+
+  <dialog id="confirm-dlg">
+    <form method="dialog" class="dlg-body">
+      <h3 id="confirm-title"></h3>
+      <p id="confirm-text"></p>
+      <div class="dlg-actions">
+        <button class="btn" value="cancel">Отмена</button>
+        <button class="btn solid-danger" value="ok" id="confirm-ok">Удалить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="share-dlg">
+    <form method="dialog" class="dlg-body">
+      <h3>Прямая ссылка</h3>
+      <p>Работает без входа — для VLC, телевизора, wget или менеджера загрузок. Никому не передавайте.</p>
+      <div class="seg" id="share-ttl">
+        <button type="button" data-hours="6">6 часов</button>
+        <button type="button" data-hours="24" class="active">24 часа</button>
+        <button type="button" data-hours="168">7 дней</button>
+      </div>
+      <div class="share-row">
+        <input class="input" id="share-url" readonly>
+        <button class="btn primary" type="button" id="share-copy">Копировать</button>
+      </div>
+      <div class="dlg-actions">
+        <button class="btn" value="close">Закрыть</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="player-dlg" class="player-dlg">
+    <div class="player-head">
+      <div class="title" id="player-title"></div>
+      <button class="btn" id="player-link" type="button">Ссылка для VLC</button>
+      <button class="icon-btn" id="player-close" aria-label="Закрыть">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div id="player-slot"></div>
+    <div class="player-note" id="player-note">Если видео не воспроизводится (например, MKV с кодеком HEVC или звуком AC3/DTS) — откройте ссылку в VLC.</div>
+  </dialog>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
