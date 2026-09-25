@@ -107,6 +107,9 @@ app.post('/api/torrents/:id/pause', wrap(async (req, res) => res.json(await mana
 app.post('/api/torrents/:id/resume', (req, res) => res.json(manager.resume(req.params.id)))
 app.delete('/api/torrents/:id', wrap(async (req, res) => res.json(await manager.remove(req.params.id))))
 
+app.get('/api/settings', (req, res) => res.json(manager.getSettings()))
+app.put('/api/settings', express.json({ limit: '4kb' }), (req, res) => res.json(manager.setSettings(req.body || {})))
+
 app.delete('/api/history/:id', (req, res) => { manager.clearHistory(req.params.id); res.json({ ok: true }) })
 app.delete('/api/history', (req, res) => { manager.clearHistory(); res.json({ ok: true }) })
 

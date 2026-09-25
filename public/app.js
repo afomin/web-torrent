@@ -320,6 +320,7 @@ async function refreshTorrents () {
   $('#active-count').classList.toggle('hidden', !active)
   $('#total-down').textContent = `↓ ${fmtSpeed(data.totals.downloadSpeed)}`
   $('#total-up').textContent = `↑ ${fmtSpeed(data.totals.uploadSpeed)}`
+  renderSeeding(data.settings, data.totals.uploadSpeed)
   document.title = active ? `(${active}) Web Torrent` : 'Web Torrent'
 
   if (lastHistoryCount !== null && data.history.length > lastHistoryCount) {
@@ -333,6 +334,63 @@ async function refreshTorrents () {
 $('#clear-history').addEventListener('click', async () => {
   await api('DELETE', '/api/history').catch(err => toast(err.message, 'error'))
   refreshTorrents()
+})
+
+// ---------- seeding ----------
+
+// Slider positions -> KB/s (0 = unlimited)
+const UPLOAD_STEPS = [10, 25, 50, 100, 250, 500, 1024, 2048, 5120, 10240, 0]
+let seedSettings = null
+let seedDirty = false // user is interacting; don't overwrite from polling
+
+const fmtLimit = kb => (kb === 0 ? 'без лимита' : fmtSpeed(kb * 1024))
+
+function stepIndexFor (kb) {
+  if (kb === 0) return UPLOAD_STEPS.length - 1
+  let best = 0
+  UPLOAD_STEPS.forEach((v, i) => { if (v && Math.abs(v - kb) < Math.abs(UPLOAD_STEPS[best] - kb)) best = i })
+  return best
+}
+
+function renderSeeding (settings, uploadSpeed) {
+  $('#seed-speed').textContent = fmtSpeed(uploadSpeed || 0)
+  if (!settings || seedDirty) return
+  seedSettings = settings
+  $('#seed-card').classList.toggle('on', settings.seeding)
+  $('#seed-toggle').checked = settings.seeding
+  $('#seed-state').textContent = settings.seeding ? 'включена' : 'выключена'
+  $('#seed-hint').textContent = settings.seeding
+    ? 'Сервер отдаёт части скачиваемых торрентов. После завершения загрузки раздача всё равно останавливается.'
+    : 'Сервер только скачивает и ничего не отдаёт другим пирам.'
+  $('#seed-range').value = stepIndexFor(settings.uploadLimitKB)
+  $('#seed-range').disabled = !settings.seeding
+  $('#seed-limit-label').textContent = fmtLimit(settings.uploadLimitKB)
+}
+
+async function saveSeeding (patch) {
+  try {
+    const s = await api('PUT', '/api/settings', patch)
+    seedDirty = false
+    renderSeeding(s)
+  } catch (err) {
+    seedDirty = false
+    toast(err.message, 'error')
+    refreshTorrents()
+  }
+}
+
+$('#seed-toggle').addEventListener('change', e => {
+  seedDirty = true
+  saveSeeding({ seeding: e.target.checked }).then(() => {
+    toast(e.target.checked ? 'Раздача включена' : 'Раздача выключена')
+  })
+})
+$('#seed-range').addEventListener('input', e => {
+  seedDirty = true
+  $('#seed-limit-label').textContent = fmtLimit(UPLOAD_STEPS[e.target.value])
+})
+$('#seed-range').addEventListener('change', e => {
+  saveSeeding({ uploadLimitKB: UPLOAD_STEPS[e.target.value] })
 })
 
 // ---------- disk ----------

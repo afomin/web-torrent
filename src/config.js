@@ -46,8 +46,7 @@ export const config = {
   // "true" when the app is only reachable over HTTPS (behind Caddy) — cookies get the Secure flag.
   secureCookies: (env.SECURE_COOKIES || 'auto').toLowerCase(),
   torrentPort: int('TORRENT_PORT', 51413),
-  // KB/s, -1 = unlimited
-  uploadLimitKB: int('UPLOAD_LIMIT_KBPS', -1),
+  // KB/s, -1 = unlimited. Seeding on/off and upload limit are set in the UI.
   downloadLimitKB: int('DOWNLOAD_LIMIT_KBPS', -1),
   maxConns: int('MAX_CONNS', 100),
   linkSecret: loadSecret()

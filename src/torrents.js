@@ -21,6 +21,11 @@ const PUBLIC_TRACKERS = [
 const MAX_TORRENT_FILE = 10 * 1024 * 1024
 const HISTORY_LIMIT = 100
 
+// Seeding is off by default: peers are kept choked and piece requests are refused.
+// Upload speed limit in KB/s, 0 = unlimited. Lower bound keeps protocol messages flowing.
+const DEFAULT_SETTINGS = { seeding: false, uploadLimitKB: 500 }
+const MIN_UPLOAD_KB = 10
+
 export class TorrentError extends Error {
   constructor (msg, status = 400) {
     super(msg)
@@ -32,6 +37,8 @@ export class TorrentManager {
   constructor () {
     this.stateFile = path.join(config.dataDir, 'torrents.json')
     this.historyFile = path.join(config.dataDir, 'history.json')
+    this.settingsFile = path.join(config.dataDir, 'settings.json')
+    this.settings = { ...DEFAULT_SETTINGS }
     /** @type {Map<string, object>} persisted entries */
     this.entries = new Map()
     /** @type {Map<string, import('webtorrent').Torrent>} running torrents */
@@ -45,12 +52,12 @@ export class TorrentManager {
       natUpnp: false,
       natPmp: false,
       lsd: false,
-      uploadLimit: config.uploadLimitKB >= 0 ? config.uploadLimitKB * 1024 : -1,
       downloadLimit: config.downloadLimitKB >= 0 ? config.downloadLimitKB * 1024 : -1
     })
     this.client.on('error', err => console.error('[webtorrent]', err.message))
 
     this._load()
+    this._applySettings()
     for (const entry of this.entries.values()) {
       if (entry.status === 'active') this._start(entry)
     }
@@ -68,6 +75,9 @@ export class TorrentManager {
     } catch {}
     try {
       this.history = JSON.parse(fs.readFileSync(this.historyFile, 'utf8'))
+    } catch {}
+    try {
+      this.settings = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(this.settingsFile, 'utf8')) }
     } catch {}
   }
 
@@ -87,6 +97,49 @@ export class TorrentManager {
       if (e && t.ready) Object.assign(e, { progress: t.progress, length: t.length, downloaded: t.downloaded })
     }
     try { this._save() } catch (err) { console.error('save failed', err.message) }
+  }
+
+  // ---------- seeding control ----------
+
+  getSettings () {
+    return { ...this.settings }
+  }
+
+  setSettings ({ seeding, uploadLimitKB }) {
+    if (seeding !== undefined) this.settings.seeding = !!seeding
+    if (uploadLimitKB !== undefined) {
+      const n = Math.round(Number(uploadLimitKB))
+      if (!Number.isFinite(n) || n < 0) throw new TorrentError('Некорректный лимит')
+      this.settings.uploadLimitKB = n === 0 ? 0 : Math.max(n, MIN_UPLOAD_KB)
+    }
+    fs.writeFileSync(this.settingsFile, JSON.stringify(this.settings, null, 2))
+    this._applySettings()
+    return this.getSettings()
+  }
+
+  _applySettings () {
+    const { seeding, uploadLimitKB } = this.settings
+    // The throttle covers every outgoing byte (handshakes, requests), so it is only used to cap
+    // seeding speed; "no seeding" is enforced at the protocol level in _guardWire instead.
+    this.client.throttleUpload(seeding && uploadLimitKB > 0 ? uploadLimitKB * 1024 : -1)
+    for (const t of this.running.values()) {
+      for (const wire of t.wires) {
+        if (!seeding) wire.choke()
+        else if (wire.peerInterested) wire.unchoke() // don't wait for the next rechoke round
+      }
+    }
+  }
+
+  /** Keep a peer connection from receiving data unless seeding is enabled. */
+  _guardWire (wire) {
+    const unchoke = wire.unchoke.bind(wire)
+    wire.unchoke = () => { if (this.settings.seeding) unchoke() }
+    const onRequest = wire._onRequest.bind(wire)
+    wire._onRequest = (index, offset, length) => {
+      if (this.settings.seeding) return onRequest(index, offset, length)
+      if (wire.hasFast) wire.reject(index, offset, length)
+    }
+    if (!this.settings.seeding) wire.choke()
   }
 
   // ---------- adding ----------
@@ -173,6 +226,7 @@ export class TorrentManager {
     const torrent = this.client.add(source, opts)
     this.running.set(entry.id, torrent)
 
+    torrent.on('wire', wire => this._guardWire(wire))
     torrent.on('metadata', () => {
       entry.name = torrent.name
       entry.length = torrent.length
@@ -328,7 +382,8 @@ export class TorrentManager {
       totals: {
         downloadSpeed: this.client.downloadSpeed,
         uploadSpeed: this.client.uploadSpeed
-      }
+      },
+      settings: this.getSettings()
     }
   }
 

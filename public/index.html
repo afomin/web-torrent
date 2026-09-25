@@ -55,6 +55,25 @@
         </div>
       </div>
 
+      <div class="card seed-card" id="seed-card">
+        <div class="seed-row">
+          <label class="switch">
+            <input type="checkbox" id="seed-toggle">
+            <span class="slider-track"></span>
+          </label>
+          <div class="seed-text">
+            <div class="seed-title">Раздача <span class="seed-state" id="seed-state">выключена</span></div>
+            <div class="seed-hint" id="seed-hint">Сервер только скачивает и ничего не отдаёт другим пирам.</div>
+          </div>
+          <div class="seed-speed" title="Текущая скорость отдачи">↑ <b id="seed-speed">0 B/s</b></div>
+        </div>
+        <div class="seed-limit" id="seed-limit">
+          <span>Лимит отдачи</span>
+          <input type="range" id="seed-range" min="0" max="10" step="1">
+          <b id="seed-limit-label">500 KB/s</b>
+        </div>
+      </div>
+
       <div class="section-title"><span>Активные</span></div>
       <div class="list" id="torrent-list"></div>
 
