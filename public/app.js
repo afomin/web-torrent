@@ -101,7 +101,11 @@ async function api (method, url, body, headers = {}) {
     throw new Error('Unauthorized')
   }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`)
+    err.code = data.code
+    throw err
+  }
   return data
 }
 
@@ -599,15 +603,21 @@ async function loadKinozalStatus () {
 
 function openKinozalSettings () {
   const s = kz || { baseUrl: 'https://kinozal.guru' }
-  $('#kz-base').value = s.baseUrl || ''
+  const sel = $('#kz-mirror')
+  sel.replaceChildren(
+    h('option', { value: 'auto', text: 'Автоматически — первое работающее зеркало' }),
+    ...(s.mirrors || []).map(m => h('option', { value: m, text: m.replace(/^https?:\/\//, '') }))
+  )
+  sel.value = s.mirror || 'auto'
   $('#kz-user').value = s.username || ''
   $('#kz-pass').value = ''
   $('#kz-pass').placeholder = s.hasPassword ? 'Сохранён — оставьте пустым, чтобы не менять' : ''
   $('#kz-cookies').value = ''
+  const host = (s.baseUrl || '').replace(/^https?:\/\//, '')
   $('#kz-cfg-status').textContent = !s.configured
     ? 'Не подключено'
     : s.loggedIn
-      ? `Подключено${s.username ? ' как ' + s.username : ''}${s.mode === 'browser' ? ' (через встроенный браузер)' : ''}`
+      ? `Подключено${s.username ? ' как ' + s.username : ''} · ${host}${s.mode === 'browser' ? ' · через встроенный браузер' : ''}`
       : 'Вход не выполнен — проверьте данные'
   $('#kz-dlg').showModal()
 }
@@ -621,12 +631,12 @@ $('#kz-cfg-form').addEventListener('submit', async e => {
   const btn = $('#kz-save')
   btn.disabled = true
   $('#kz-cfg-status').textContent = 'Вхожу на Kinozal… (первый раз может занять до минуты)'
-  const body = { baseUrl: $('#kz-base').value.trim() || 'https://kinozal.guru', username: $('#kz-user').value.trim() }
+  const body = { mirror: $('#kz-mirror').value || 'auto', username: $('#kz-user').value.trim() }
   if ($('#kz-pass').value) body.password = $('#kz-pass').value
   if ($('#kz-cookies').value.trim()) body.cookies = $('#kz-cookies').value.trim()
   try {
-    kz = await api('PUT', '/api/kinozal/config', body)
-    toast('Kinozal подключён', 'ok')
+    kz = await kzCall(() => api('PUT', '/api/kinozal/config', body))
+    toast(`Kinozal подключён (${kz.baseUrl.replace(/^https?:\/\//, '')})`, 'ok')
     $('#kz-dlg').close()
   } catch (err) {
     $('#kz-cfg-status').textContent = err.message
@@ -651,7 +661,7 @@ $('#kz-form').addEventListener('submit', async e => {
   $('#kz-results').replaceChildren(loadingEl('Ищу на Kinozal…'))
   $('#kz-search-btn').disabled = true
   try {
-    const data = await api('GET', `/api/kinozal/search?q=${q_(q)}`)
+    const data = await kzCall(() => api('GET', `/api/kinozal/search?q=${q_(q)}`))
     kzMovies = data.movies
     renderKzResults()
   } catch (err) {
@@ -663,6 +673,76 @@ $('#kz-form').addEventListener('submit', async e => {
 })
 
 function q_ (s) { return encodeURIComponent(s) }
+
+/** Run a Kinozal API call; if the site wants "I'm not a robot", let the user solve it and retry once. */
+async function kzCall (fn) {
+  try {
+    return await fn()
+  } catch (err) {
+    if (err.code !== 'CAPTCHA') throw err
+    if (!await solveCaptcha()) throw new Error('Проверка «я не робот» не пройдена')
+    return fn()
+  }
+}
+
+let captchaPending = null
+
+function solveCaptcha () {
+  if (captchaPending) return captchaPending
+  const dlg = $('#kz-captcha')
+  const img = $('#kz-captcha-img')
+  let done = false
+  let timer = null
+  captchaPending = new Promise(resolve => {
+    const finish = ok => {
+      if (done) return
+      done = true
+      clearInterval(timer)
+      captchaPending = null
+      if (dlg.open) dlg.close()
+      resolve(ok)
+    }
+    // Server browser viewport; clicks are mapped from the displayed image to it.
+    let viewport = { width: 1000, height: 700 }
+    // Load the next frame off-screen and swap when ready, so the visible image never blanks.
+    const refresh = () => {
+      const next = new Image()
+      next.onload = () => { if (!done) img.src = next.src }
+      next.src = `/api/kinozal/captcha/screen?t=${Date.now()}`
+    }
+    const check = async () => {
+      try {
+        const s = await api('GET', '/api/kinozal/captcha/state')
+        viewport = s.viewport || viewport
+        if (s.solved) finish(true)
+      } catch {}
+    }
+    img.onclick = async e => {
+      const rect = img.getBoundingClientRect()
+      if (!rect.width || !rect.height) return
+      const x = (e.clientX - rect.left) * (viewport.width / rect.width)
+      const y = (e.clientY - rect.top) * (viewport.height / rect.height)
+      $('#kz-captcha-note').textContent = 'Отправляю клик…'
+      try {
+        const r = await api('POST', '/api/kinozal/captcha/click', { x, y })
+        if (r.solved) return finish(true)
+        $('#kz-captcha-note').textContent = 'Если галочка не сработала, нажмите ещё раз.'
+      } catch (err) {
+        $('#kz-captcha-note').textContent = err.message
+      }
+      refresh()
+    }
+    $('#kz-captcha-cancel').onclick = () => finish(false)
+    dlg.addEventListener('close', () => finish(false), { once: true })
+    $('#kz-captcha-note').textContent = 'Нажмите на галочку прямо на картинке.'
+    img.removeAttribute('src')
+    check()
+    refresh()
+    timer = setInterval(() => { refresh(); check() }, 1500)
+    dlg.showModal()
+  })
+  return captchaPending
+}
 
 function showKzResults () {
   $('#kz-results').classList.remove('hidden')
@@ -677,6 +757,8 @@ function renderKzResults () {
   $('#kz-results').replaceChildren(h('div', { class: 'list' }, kzMovies.map(m => {
     const b = m.best
     return h('div', { class: 'card movie-card', onclick: () => openMovie(m) },
+      posterImg(b?.id, 'poster-sm'),
+      h('div', { class: 'movie-info' },
       h('div', { class: 'movie-title', text: m.title }),
       h('div', { class: 'movie-sub', text: [m.altTitles.join(' / '), m.year].filter(Boolean).join(' · ') }),
       h('div', { class: 'chips' },
@@ -686,8 +768,18 @@ function renderKzResults () {
         m.hasGold ? h('span', { class: 'chip gold', text: '★ золотая' }) : null
       ),
       b ? h('div', { class: 'movie-sub', text: `Лучшая здесь: ${fmtBytes(b.size)} · ${resLabel(b.resolution) || '?'} · ${b.seeds} сидов` }) : null
+      )
     )
   })))
+}
+
+function posterImg (id, cls) {
+  const box = h('div', { class: `poster ${cls}` })
+  if (!id) return box
+  const img = h('img', { src: `/api/kinozal/poster/${encodeURIComponent(id)}`, loading: 'lazy', alt: '' })
+  img.addEventListener('error', () => img.remove())
+  box.append(img)
+  return box
 }
 
 function plural (n, one, few, many) {
@@ -698,16 +790,19 @@ function plural (n, one, few, many) {
   return many
 }
 
+let kzMovieId = null
+
 async function openMovie (m) {
+  kzMovieId = m.best?.id || null
   $('#kz-results').classList.add('hidden')
   const view = $('#kz-movie')
   view.classList.remove('hidden')
   view.replaceChildren(backBtn(), loadingEl('Ищу все раздачи этого фильма…'))
   window.scrollTo({ top: 0 })
-  const params = new URLSearchParams({ title: m.title, year: m.year || '' })
+  const params = new URLSearchParams({ title: m.title, year: m.year || '', id: m.best?.id || '' })
   for (const a of m.altTitles) params.append('alt', a)
   try {
-    kzMovie = await api('GET', `/api/kinozal/movie?${params}`)
+    kzMovie = await kzCall(() => api('GET', `/api/kinozal/movie?${params}`))
     kzSort = { key: 'score', dir: -1 }
     renderMovie()
   } catch (err) {
@@ -722,7 +817,7 @@ function backBtn () {
 async function kzDownload (r, mode, btn) {
   if (btn) btn.disabled = true
   try {
-    const t = await api('POST', '/api/kinozal/download', { id: r.id, name: r.name, mode })
+    const t = await kzCall(() => api('POST', '/api/kinozal/download', { id: r.id, name: r.name, mode }))
     toast(`Загрузка добавлена${t.via === 'magnet' ? ' (magnet)' : ' (.torrent)'}: ${t.name}`, 'ok')
     refreshTorrents()
   } catch (err) {
@@ -740,12 +835,23 @@ function releaseChips (r) {
 }
 
 function renderMovie () {
-  const { movie, releases } = kzMovie
+  const { movie, releases, details } = kzMovie
   const view = $('#kz-movie')
   const best = releases[0]
+  const d = details || {}
+  const posterId = d.poster ? kzMovieId : null
   const head = h('div', { class: 'movie-head' },
-    h('h2', { text: movie.title }),
-    h('div', { class: 'movie-sub', text: [movie.altTitles.join(' / '), movie.year, `${releases.length} ${plural(releases.length, 'раздача', 'раздачи', 'раздач')}`].filter(Boolean).join(' · ') })
+    posterId ? posterImg(posterId, 'poster-lg') : null,
+    h('div', { class: 'movie-info' },
+      h('h2', { text: movie.title }),
+      h('div', { class: 'movie-sub', text: [movie.altTitles.join(' / '), movie.year, `${releases.length} ${plural(releases.length, 'раздача', 'раздачи', 'раздач')}`].filter(Boolean).join(' · ') }),
+      h('div', { class: 'chips' },
+        d.imdb ? h('span', { class: 'chip', text: `IMDb ${d.imdb}` }) : null,
+        d.kinopoisk ? h('span', { class: 'chip', text: `Кинопоиск ${d.kinopoisk}` }) : null,
+        d.genre ? h('span', { class: 'chip', text: d.genre }) : null
+      ),
+      d.description ? h('p', { class: 'movie-desc', text: d.description }) : null
+    )
   )
   if (!best) {
     view.replaceChildren(backBtn(), head, h('div', { class: 'empty', text: 'Раздачи не найдены' }))

@@ -174,8 +174,8 @@
     <form class="dlg-body" id="kz-cfg-form">
       <h3>Kinozal</h3>
       <p id="kz-cfg-status">Не подключено</p>
-      <label class="field-label" for="kz-base">Адрес сайта</label>
-      <input class="input" id="kz-base" placeholder="https://kinozal.guru" autocomplete="off">
+      <label class="field-label" for="kz-mirror">Зеркало</label>
+      <select class="input" id="kz-mirror"></select>
       <label class="field-label" for="kz-user">Логин</label>
       <input class="input" id="kz-user" autocomplete="off">
       <label class="field-label" for="kz-pass">Пароль</label>
@@ -191,6 +191,18 @@
         <button class="btn primary" type="submit" id="kz-save">Сохранить и войти</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="kz-captcha" class="captcha-dlg">
+    <div class="dlg-body">
+      <h3>Kinozal: «Я не робот»</h3>
+      <p>Сайт просит подтверждение. Это страница из браузера на сервере — клик по картинке передаётся туда.</p>
+      <div class="captcha-frame"><img id="kz-captcha-img" alt="Страница Kinozal"></div>
+      <p class="muted" id="kz-captcha-note"></p>
+      <div class="dlg-actions">
+        <button class="btn" type="button" id="kz-captcha-cancel">Отмена</button>
+      </div>
+    </div>
   </dialog>
 
   <div class="toasts" id="toasts"></div>

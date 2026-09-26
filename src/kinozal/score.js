@@ -53,6 +53,9 @@ export function scoreRelease (r) {
   if (r.gold) {
     score += 10
     reasons.push('золотая')
+  } else if (r.silver) {
+    score += 4
+    reasons.push('серебряная')
   }
 
   return { score: Math.round(score * 10) / 10, reasons, warnings }
@@ -64,7 +67,8 @@ export function rankReleases (releases) {
     .sort((a, b) => b.score - a.score || b.seeds - a.seeds)
 }
 
-export const normTitle = s => String(s).toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+// "Interstellar (IMAX Edition)" and "Interstellar" are the same movie.
+export const normTitle = s => String(s).toLowerCase().replace(/ё/g, 'е').replace(/\([^)]*\)/g, ' ').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
 
 export function movieKey (r) {
   return `${normTitle(r.titles[0])}|${r.year || ''}`
@@ -74,6 +78,7 @@ export function movieKey (r) {
 export function groupMovies (releases) {
   const map = new Map()
   for (const r of releases) {
+    if (r.video === false) continue
     const key = movieKey(r)
     let m = map.get(key)
     if (!m) {
@@ -87,7 +92,7 @@ export function groupMovies (releases) {
     return {
       key: m.key,
       title: m.title,
-      altTitles: m.altTitles,
+      altTitles: uniqueTitles(ranked.flatMap(r => r.titles.slice(1)), m.title),
       year: m.year,
       count: ranked.length,
       maxSeeds: Math.max(...ranked.map(r => r.seeds)),
@@ -98,8 +103,20 @@ export function groupMovies (releases) {
   }).sort((a, b) => b.maxSeeds - a.maxSeeds)
 }
 
+/** Distinct titles by normalized form, shortest spelling wins ("Interstellar" over "Interstellar (IMAX Edition)"). */
+function uniqueTitles (titles, main) {
+  const byNorm = new Map()
+  for (const t of titles) {
+    const n = normTitle(t)
+    if (!n || n === normTitle(main)) continue
+    if (!byNorm.has(n) || t.length < byNorm.get(n).length) byNorm.set(n, t)
+  }
+  return [...byNorm.values()].slice(0, 3)
+}
+
 /** Does a release belong to the given movie (same main title or alt title, same year)? */
 export function sameMovie (r, movie) {
+  if (r.video === false) return false
   if (movie.year && r.year && movie.year !== r.year) return false
   const wanted = new Set([movie.title, ...(movie.altTitles || [])].map(normTitle))
   return r.titles.some(t => wanted.has(normTitle(t)))

@@ -1,15 +1,18 @@
-// A tiny stand-in for kinozal: windows-1251 pages, cookie login, optional DDoS-Guard style JS check.
+// A stand-in for Kinozal that serves real (sanitized) pages saved from kinozal.guru,
+// with cookie login and optional anti-bot pages:
+//   challenge: 'auto'   — JS check that passes by itself after a moment (DDoS-Guard style)
+//   challenge: 'manual' — "I'm not a robot" box that only a real click passes
 import http from 'node:http'
-import { encode } from '../../src/kinozal/cp1251.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { decode, encode } from '../../src/kinozal/cp1251.js'
 
-export const RELEASES = [
-  { id: 101, name: 'Интерстеллар / Interstellar / 2014 / ПМ, СТ / BDRip (1080p)', size: '10.43 ГБ', seeds: 154, peers: 3, gold: true },
-  { id: 102, name: 'Интерстеллар / Interstellar / 2014 / ПМ / BDRip (1080p)', size: '12 ГБ', seeds: 300, peers: 12 },
-  { id: 103, name: 'Интерстеллар / Interstellar / 2014 / ДБ, СТ / UHD BDRemux (2160p, HDR)', size: '80.1 ГБ', seeds: 40, peers: 2 },
-  { id: 104, name: 'Интерстеллар / Interstellar / 2014 / ПМ, СТ / BDRip (720p)', size: '4.4 ГБ', seeds: 500, peers: 30 },
-  { id: 105, name: 'Интерстеллар: Наука / The Science of Interstellar / 2015 / СТ / WEB-DL (1080p)', size: '3 ГБ', seeds: 10, peers: 0 }
-]
-export const hashFor = id => String(id).repeat(20).slice(0, 40).padEnd(40, 'a').replace(/[^0-9a]/g, 'a')
+const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'kinozal')
+const fixture = name => fs.readFileSync(path.join(dir, name))
+export const hashFor = id => (String(id) + '0'.repeat(40)).slice(0, 40)
+// Smallest valid JPEG header is enough for the image sniffer.
+export const POSTER = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 0xff, 0xd9])
 
 function decode1251Query (s) {
   const bytes = []
@@ -17,7 +20,7 @@ function decode1251Query (s) {
     if (s[i] === '%') { bytes.push(parseInt(s.slice(i + 1, i + 3), 16)); i += 2 } else if (s[i] === '+') bytes.push(32)
     else bytes.push(s.charCodeAt(i))
   }
-  return new TextDecoder('windows-1251').decode(Buffer.from(bytes))
+  return decode(Buffer.from(bytes))
 }
 const params = str => Object.fromEntries(String(str).split('&').filter(Boolean).map(p => {
   const [k, v = ''] = p.split('=')
@@ -25,19 +28,16 @@ const params = str => Object.fromEntries(String(str).split('&').filter(Boolean).
 }))
 const cookies = req => Object.fromEntries(String(req.headers.cookie || '').split(';').map(s => s.trim().split('=')).filter(p => p[0]))
 
-const page = (body, loggedIn) => `<html><head><meta charset="windows-1251"><title>Кинозал</title></head><body>
-<div class="menu">${loggedIn ? '<a href="/logout.php?hash4u=x">Выход</a>' : '<form action="/takelogin.php" method="post"><input name="username"><input name="password" type="password"></form>'}</div>
-${body}</body></html>`
+const AUTO_CHECK = `<html><body>DDoS-Guard: проверка браузера...<script>
+  setTimeout(() => { document.cookie = 'bot_ok=1; path=/'; location.reload() }, 300)</script></body></html>`
+// No <input>: the box is a plain div at a known spot, so only a real click at (500, 300) passes.
+const MANUAL_CHECK = `<html><body style="margin:0">
+  <div style="position:absolute;left:0;top:0;width:1000px;text-align:center">Подтвердите, что вы не робот</div>
+  <div id="box" style="position:absolute;left:480px;top:280px;width:40px;height:40px;border:2px solid #333"></div>
+  <script>document.getElementById('box').addEventListener('click', () => {
+    document.cookie = 'bot_ok=1; path=/'; location.reload() })</script></body></html>`
 
-function results (list) {
-  const rows = list.map(r => `<tr class="bg"><td class="bt"><img src="/pic/cat/8.gif" onclick="cat(8);"></td>
-<td class="nam"><a href="/details.php?id=${r.id}" class="r1">${r.name}</a>${r.gold ? ' <img src="/pic/gold.gif" title="Золотая раздача">' : ''}</td>
-<td class="s">2</td><td class="s">${r.size}</td><td class="sl_s">${r.seeds}</td><td class="sl_p">${r.peers}</td>
-<td class="s">сегодня в 10:15</td><td class="sl"><a href="/userdetails.php?id=5">uploader</a></td></tr>`).join('\n')
-  return `<table class="t_peer w100p"><tr class="mn"><td>Кат</td><td>Название</td><td>Ком</td><td>Размер</td><td>Сиды</td><td>Пиры</td><td>Залит</td><td>Раздает</td></tr>${rows}</table>`
-}
-
-export function startFakeKinozal ({ challenge = false, torrentFor } = {}) {
+export function startFakeKinozal ({ challenge = false } = {}) {
   const log = []
   const server = http.createServer((req, res) => {
     let body = ''
@@ -45,14 +45,13 @@ export function startFakeKinozal ({ challenge = false, torrentFor } = {}) {
     req.on('end', () => {
       const url = new URL(req.url, 'http://x')
       const c = cookies(req)
-      log.push(`${req.method} ${url.pathname}`)
-      const send = (status, html, headers = {}) => {
+      log.push(`${req.method} ${url.pathname}${url.search}`)
+      const send = (status, content, headers = {}) => {
         res.writeHead(status, { 'Content-Type': 'text/html; charset=windows-1251', ...headers })
-        res.end(encode(html))
+        res.end(Buffer.isBuffer(content) ? content : encode(content))
       }
-      if (challenge && c.__ddg_ok !== '1') {
-        return send(403, `<html><body>DDoS-Guard: проверка браузера...<script>
-          setTimeout(() => { document.cookie = '__ddg_ok=1; path=/'; location.reload() }, 300)</script></body></html>`, { Server: 'ddos-guard' })
+      if (challenge && c.bot_ok !== '1') {
+        return send(403, challenge === 'manual' ? MANUAL_CHECK : AUTO_CHECK, { Server: 'ddos-guard' })
       }
       const loggedIn = c.uid === '7' && c.pass === 'good'
       if (url.pathname === '/takelogin.php' && req.method === 'POST') {
@@ -61,27 +60,31 @@ export function startFakeKinozal ({ challenge = false, torrentFor } = {}) {
           res.writeHead(302, { Location: '/', 'Set-Cookie': ['uid=7; path=/', 'pass=good; path=/'] })
           return res.end()
         }
-        return send(200, page('<div class="bx1"><div class="red">Неверный пароль</div></div>', false))
+        return send(200, fixture('login.html'))
       }
-      if (url.pathname === '/') return send(200, page('<p>Главная</p>', loggedIn))
-      if (!loggedIn) return send(200, page('<p>Войдите</p>', false))
+      if (url.pathname.startsWith('/i/poster/')) {
+        res.writeHead(200, { 'Content-Type': 'image/jpeg' })
+        return res.end(POSTER)
+      }
+      if (!loggedIn) return send(200, fixture('login.html'))
+      if (url.pathname === '/') return send(200, fixture('search.html'))
       if (url.pathname === '/browse.php') {
         const q = decode1251Query(url.search.match(/[?&]s=([^&]*)/)?.[1] || '').toLowerCase()
-        const page0 = url.searchParams.get('page') === '0'
-        const list = page0 ? RELEASES.filter(r => r.name.toLowerCase().includes(q)) : []
-        return send(200, page(list.length ? results(list) : '<div>Ничего не найдено</div>', true))
+        if (url.searchParams.get('page') === '0' && /интерстеллар|interstellar/.test(q)) return send(200, fixture('search.html'))
+        return send(200, decode(fixture('search.html')).replace(/<tr class='first bg'>[\s\S]*<\/table><\/div>\s*\n\s*<\/div><div class="clr">/, '</table></div></div><div class="clr">').replace('Найдено 48', 'Найдено 0'))
       }
+      if (url.pathname === '/details.php') return send(200, fixture('details.html'))
       if (url.pathname === '/get_srv_details.php') {
         return send(200, `<ul><li>Инфо хеш: ${hashFor(url.searchParams.get('id')).toUpperCase()}</li></ul>`)
       }
       if (url.pathname === '/download.php') {
         res.writeHead(200, { 'Content-Type': 'application/x-bittorrent' })
-        return res.end(torrentFor ? torrentFor(url.searchParams.get('id')) : Buffer.from('d4:infod4:name1:xee'))
+        return res.end(Buffer.from('d4:infod4:name1:xee'))
       }
-      send(404, page('404', true))
+      send(404, 'not found')
     })
   })
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => {
-    resolve({ server, log, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(r => server.close(r)) })
+    resolve({ server, log, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(r => { server.closeAllConnections(); server.close(r) }) })
   }))
 }

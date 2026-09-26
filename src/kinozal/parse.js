@@ -2,6 +2,7 @@
 // meaning (links to details.php, size-looking cells, seed/peer classes) rather
 // than exact positions, so small layout changes don't break it.
 import * as cheerio from 'cheerio'
+import { decode } from './cp1251.js'
 
 const GB = 1024 ** 3
 const UNITS = { б: 1, b: 1, кб: 1024, kb: 1024, мб: 1024 ** 2, mb: 1024 ** 2, гб: GB, gb: GB, тб: 1024 ** 4, tb: 1024 ** 4 }
@@ -40,7 +41,8 @@ export function parseName (name) {
   if (/2160p|\b4K\b|UHD/i.test(rest)) resolution = 2160
   else if (/1080[pi]/i.test(rest)) resolution = 1080
   else if (/720p/i.test(rest)) resolution = 720
-  else if (/\b(DVDRip|SATRip|TVRip|DVD5|DVD9|480p|576p)\b/i.test(rest)) resolution = 480
+  // Kinozal leaves SD rips without a resolution: "BDRip", "BDRip (AVC)", "DVDRip", "DVD-9"...
+  else if (/\b(BDRip|HDRip|WEBRip|WEB-DLRip|DVDRip|SATRip|TVRip|DVD-?5|DVD-?9|480p|576p)\b/i.test(rest)) resolution = 480
 
   return {
     titles,
@@ -54,14 +56,21 @@ export function parseName (name) {
   }
 }
 
-function looksGold ($, el) {
-  let gold = false
-  $(el).find('img, span, a, div, i').each((_, e) => {
-    const s = [e.attribs?.src, e.attribs?.class, e.attribs?.title, e.attribs?.alt].filter(Boolean).join(' ')
-    if (/gold|золот/i.test(s)) gold = true
-  })
-  const cls = $(el).attr('class') || ''
-  return gold || /gold/i.test(cls)
+// Kinozal colours release links by download bonus: r1 = gold ("Золотая раздача": download
+// isn't counted), r2 = silver, r0 = normal. Confirmed on a real details page.
+function bonusOf (cls = '') {
+  const c = ` ${cls} `
+  return { gold: / r1 /.test(c), silver: / r2 /.test(c) }
+}
+
+// Video sections of the tracker (films, series, cartoons, shows); everything else is
+// music, books, games, software.
+export const VIDEO_CATEGORIES = new Set([45, 46, 8, 6, 15, 17, 35, 39, 13, 14, 24, 11, 10, 9, 47, 18, 37, 12, 7, 48, 49, 50, 38, 16, 21, 22, 20])
+
+function categoryOf ($, tr) {
+  const img = $(tr).find('td.bt img, img[src*="/pic/cat/"]').first()
+  const m = (img.attr('onclick') || '').match(/cat\((\d+)\)/) || (img.attr('src') || '').match(/\/pic\/cat\/(\d+)\./)
+  return m ? Number(m[1]) : null
 }
 
 /** Parse browse.php results. */
@@ -89,6 +98,7 @@ export function parseSearch (html) {
 
     const seedsCell = $(tr).find('td.sl_s')
     const peersCell = $(tr).find('td.sl_p')
+    const category = categoryOf($, tr)
     seen.add(id)
     releases.push({
       id,
@@ -97,11 +107,70 @@ export function parseSearch (html) {
       seeds: seedsCell.length ? int(seedsCell.text()) : 0,
       peers: peersCell.length ? int(peersCell.text()) : 0,
       date,
-      gold: looksGold($, tr),
+      category,
+      video: category === null || VIDEO_CATEGORIES.has(category),
+      ...bonusOf(link.attr('class')),
       ...parseName(name)
     })
   })
   return releases
+}
+
+/** details.php: poster, description, genre, ratings and the site's own "similar releases" query. */
+export function parseDetails (html, baseUrl) {
+  const $ = cheerio.load(html)
+  const abs = u => { try { return u ? new URL(u, baseUrl).href : null } catch { return null } }
+
+  const poster = abs($('img.p200').first().attr('src') || $('meta[property="og:image"]').attr('content'))
+  let description = null
+  $('.bx1 p, .bx1.justify p').each((_, p) => {
+    const t = $(p).text().replace(/\s+/g, ' ').trim()
+    if (!description && /^О (фильме|сериале|мультфильме|передаче|концерте)\s*:/i.test(t)) description = t.replace(/^[^:]+:\s*/, '')
+  })
+  if (!description) {
+    const d = $('.bx1.justify p').first().text().replace(/\s+/g, ' ').trim()
+    description = d || null
+  }
+
+  let genre = null
+  $('.bx1 h2 b').each((_, b) => {
+    if (/^Жанр/i.test($(b).text())) genre = $(b).next('span').text().trim() || null
+  })
+
+  const rating = re => {
+    const a = $('a').filter((_, el) => re.test($(el).attr('href') || '')).first()
+    const v = parseFloat(a.find('.floatright').text().replace(',', '.'))
+    return Number.isFinite(v) && v > 0 ? v : null
+  }
+
+  let similarQuery = null
+  $('a[href*="browse.php?s="]').each((_, a) => {
+    if (similarQuery || !/Подобные раздачи/i.test($(a).text())) return
+    const raw = ($(a).attr('href').match(/[?&]s=([^&]*)/) || [])[1]
+    if (raw) similarQuery = decode(Buffer.from(percentDecodeBytes(raw)))
+  })
+
+  const title = $('h1 a').first()
+  return {
+    name: title.text().trim() || null,
+    poster,
+    description,
+    genre,
+    imdb: rating(/imdb\.com/),
+    kinopoisk: rating(/kinopoisk\.ru\/film\/\d+\/?$/),
+    similarQuery,
+    ...bonusOf(title.attr('class'))
+  }
+}
+
+// "%C8%ED+%2F" → bytes (the site percent-encodes windows-1251)
+function percentDecodeBytes (s) {
+  const out = []
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '%' && /^[0-9a-f]{2}$/i.test(s.slice(i + 1, i + 3))) { out.push(parseInt(s.slice(i + 1, i + 3), 16)); i += 2 } else if (s[i] === '+') out.push(32)
+    else out.push(s.charCodeAt(i) & 0xff)
+  }
+  return out
 }
 
 /** Info hash from get_srv_details.php?action=2 or a details page. */
@@ -121,11 +190,13 @@ export function loginError (html) {
   return red || null
 }
 
-/** DDoS-Guard / Cloudflare style "checking your browser" pages. */
+/** Anti-bot pages: DDoS-Guard / Cloudflare "checking your browser", "I'm not a robot" checkboxes. */
 export function isChallenge (status, html, headers = {}) {
   const server = String(headers.server || '').toLowerCase()
-  if (server.includes('ddos-guard') && (status === 403 || status === 503)) return true
-  const head = String(html).slice(0, 20000)
-  return /ddos-guard|checking your browser|проверка браузера|проверяем ваш браузер|cf-browser-verification|challenge-platform|__ddg/i.test(head) &&
-    !/details\.php\?id=|logout\.php|takelogin\.php/i.test(head)
+  const text = String(html)
+  // A real Kinozal page always has the site menu with the browse link.
+  const isSitePage = /href="\/browse\.php"|takelogin\.php|details\.php\?id=|get_srv_details|Инфо хеш/i.test(text)
+  if (isSitePage) return false
+  if ((server.includes('ddos-guard') || server.includes('cloudflare')) && (status === 403 || status === 503 || status === 429)) return true
+  return /ddos-guard|checking your browser|проверка браузера|проверяем ваш браузер|cf-browser-verification|challenge-platform|cf-turnstile|turnstile|captcha|не робот|just a moment|__ddg/i.test(text.slice(0, 50000))
 }

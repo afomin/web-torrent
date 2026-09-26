@@ -10,12 +10,15 @@ import {
 } from './auth.js'
 import { listDir, remove, resolveSafe, diskUsage, toRel, PathError } from './files.js'
 import { TorrentManager, TorrentError } from './torrents.js'
-import { KinozalClient, KinozalError } from './kinozal/client.js'
+import { KinozalClient, KinozalError, MIRRORS } from './kinozal/client.js'
 import { groupMovies, rankReleases } from './kinozal/score.js'
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 const manager = new TorrentManager()
-const kinozal = new KinozalClient({ dataDir: config.dataDir })
+const kinozal = new KinozalClient({
+  dataDir: config.dataDir,
+  mirrors: process.env.KINOZAL_MIRRORS ? process.env.KINOZAL_MIRRORS.split(',').map(s => s.trim().replace(/\/+$/, '')) : MIRRORS
+})
 const app = express()
 
 app.disable('x-powered-by')
@@ -121,8 +124,8 @@ app.delete('/api/history', (req, res) => { manager.clearHistory(); res.json({ ok
 app.get('/api/kinozal/status', (req, res) => res.json(kinozal.status()))
 
 app.put('/api/kinozal/config', express.json({ limit: '8kb' }), wrap(async (req, res) => {
-  const { baseUrl, username, password, cookies } = req.body || {}
-  res.json(await kinozal.configure({ baseUrl, username, password, cookies }))
+  const { mirror, username, password, cookies } = req.body || {}
+  res.json(await kinozal.configure({ mirror, username, password, cookies }))
 }))
 
 app.post('/api/kinozal/logout', wrap(async (req, res) => res.json(await kinozal.logout())))
@@ -140,7 +143,43 @@ app.get('/api/kinozal/movie', wrap(async (req, res) => {
     altTitles: [].concat(req.query.alt || []).map(String).filter(Boolean),
     year: parseInt(req.query.year, 10) || null
   }
-  res.json({ movie, releases: rankReleases(await kinozal.releasesForMovie(movie)) })
+  // Details of a known release give the poster/description and the site's "similar releases" query.
+  const details = req.query.id ? await kinozal.details(String(req.query.id)).catch(err => {
+    if (err.code === 'CAPTCHA') throw err
+    return null
+  }) : null
+  const releases = rankReleases(await kinozal.releasesForMovie(movie, details?.similarQuery))
+  res.json({ movie, details, releases })
+}))
+
+app.get('/api/kinozal/details/:id', wrap(async (req, res) => res.json(await kinozal.details(req.params.id))))
+
+app.get('/api/kinozal/poster/:id', wrap(async (req, res) => {
+  const img = await kinozal.poster(req.params.id).catch(() => null)
+  if (!img) return res.status(404).end()
+  res.setHeader('Content-Type', img.type)
+  res.setHeader('Cache-Control', 'private, max-age=604800')
+  res.end(img.buf)
+}))
+
+// "I'm not a robot": the server-side browser page is shown to the user as a screenshot,
+// their clicks are replayed there.
+app.get('/api/kinozal/captcha/screen', wrap(async (req, res) => {
+  const shot = await kinozal.captchaScreenshot()
+  if (!shot) return res.status(404).end()
+  res.setHeader('Content-Type', 'image/jpeg')
+  res.setHeader('Cache-Control', 'no-store')
+  res.end(shot)
+}))
+
+app.get('/api/kinozal/captcha/state', wrap(async (req, res) => {
+  res.json({ solved: await kinozal.captchaSolved(), viewport: kinozal.viewport })
+}))
+
+app.post('/api/kinozal/captcha/click', express.json({ limit: '1kb' }), wrap(async (req, res) => {
+  await kinozal.captchaClick(req.body?.x, req.body?.y)
+  await new Promise(resolve => setTimeout(resolve, 1500))
+  res.json({ solved: await kinozal.captchaSolved() })
 }))
 
 app.post('/api/kinozal/download', express.json({ limit: '8kb' }), wrap(async (req, res) => {
@@ -227,7 +266,7 @@ app.use((err, req, res, next) => {
   else if (status >= 500 && !(err instanceof PathError) && !(err instanceof TorrentError)) console.error(err)
   if (res.headersSent) return res.destroy()
   const expose = status < 500 || err instanceof KinozalError
-  res.status(status).json({ error: expose ? err.message : 'Внутренняя ошибка сервера' })
+  res.status(status).json({ error: expose ? err.message : 'Внутренняя ошибка сервера', code: expose ? err.code : undefined })
 })
 
 const server = app.listen(config.port, config.host, () => {
