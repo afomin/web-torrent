@@ -10,9 +10,12 @@ import {
 } from './auth.js'
 import { listDir, remove, resolveSafe, diskUsage, toRel, PathError } from './files.js'
 import { TorrentManager, TorrentError } from './torrents.js'
+import { KinozalClient, KinozalError } from './kinozal/client.js'
+import { groupMovies, rankReleases } from './kinozal/score.js'
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 const manager = new TorrentManager()
+const kinozal = new KinozalClient({ dataDir: config.dataDir })
 const app = express()
 
 app.disable('x-powered-by')
@@ -113,6 +116,47 @@ app.put('/api/settings', express.json({ limit: '4kb' }), (req, res) => res.json(
 app.delete('/api/history/:id', (req, res) => { manager.clearHistory(req.params.id); res.json({ ok: true }) })
 app.delete('/api/history', (req, res) => { manager.clearHistory(); res.json({ ok: true }) })
 
+// ----- kinozal search -----
+
+app.get('/api/kinozal/status', (req, res) => res.json(kinozal.status()))
+
+app.put('/api/kinozal/config', express.json({ limit: '8kb' }), wrap(async (req, res) => {
+  const { baseUrl, username, password, cookies } = req.body || {}
+  res.json(await kinozal.configure({ baseUrl, username, password, cookies }))
+}))
+
+app.post('/api/kinozal/logout', wrap(async (req, res) => res.json(await kinozal.logout())))
+
+app.get('/api/kinozal/search', wrap(async (req, res) => {
+  const releases = await kinozal.search(String(req.query.q || ''))
+  res.json({ movies: groupMovies(releases) })
+}))
+
+app.get('/api/kinozal/movie', wrap(async (req, res) => {
+  const title = String(req.query.title || '').trim()
+  if (!title) throw new KinozalError('Не указано название', 400)
+  const movie = {
+    title,
+    altTitles: [].concat(req.query.alt || []).map(String).filter(Boolean),
+    year: parseInt(req.query.year, 10) || null
+  }
+  res.json({ movie, releases: rankReleases(await kinozal.releasesForMovie(movie)) })
+}))
+
+app.post('/api/kinozal/download', express.json({ limit: '8kb' }), wrap(async (req, res) => {
+  const { id, name, mode } = req.body || {}
+  let hash = null
+  if (mode !== 'torrent') hash = await kinozal.infoHash(id)
+  let input
+  if (hash) {
+    input = { magnet: `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(String(name || hash))}` }
+  } else {
+    input = { torrentFile: await kinozal.torrentFile(id) }
+  }
+  const t = await manager.add(input)
+  res.status(201).json({ ...t, via: hash ? 'magnet' : 'torrent' })
+}))
+
 // ----- files -----
 
 app.get('/api/files', wrap(async (req, res) => res.json(await listDir(String(req.query.path || '')))))
@@ -179,9 +223,11 @@ app.use((req, res) => res.status(404).json({ error: 'Not found' }))
 
 app.use((err, req, res, next) => {
   const status = err.status || err.statusCode || 500
-  if (status >= 500 && !(err instanceof PathError) && !(err instanceof TorrentError)) console.error(err)
+  if (err instanceof KinozalError) console.warn('[kinozal]', err.message)
+  else if (status >= 500 && !(err instanceof PathError) && !(err instanceof TorrentError)) console.error(err)
   if (res.headersSent) return res.destroy()
-  res.status(status).json({ error: status >= 500 ? 'Внутренняя ошибка сервера' : err.message })
+  const expose = status < 500 || err instanceof KinozalError
+  res.status(status).json({ error: expose ? err.message : 'Внутренняя ошибка сервера' })
 })
 
 const server = app.listen(config.port, config.host, () => {
@@ -195,7 +241,7 @@ async function shutdown () {
   shuttingDown = true
   console.log('shutting down...')
   server.close()
-  await manager.shutdown().catch(() => {})
+  await Promise.all([manager.shutdown(), kinozal.close()]).catch(() => {})
   process.exit(0)
 }
 process.on('SIGINT', shutdown)

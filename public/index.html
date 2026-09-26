@@ -36,6 +36,7 @@
   <main class="container">
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="downloads" role="tab">Загрузки <span class="badge hidden" id="active-count">0</span></button>
+      <button class="tab" data-tab="search" role="tab">Поиск</button>
       <button class="tab" data-tab="files" role="tab">Файлы</button>
     </nav>
 
@@ -84,6 +85,30 @@
         </div>
         <div class="list" id="history-list"></div>
       </div>
+    </section>
+
+    <section id="view-search" class="hidden">
+      <form class="card add-card add-row" id="kz-form">
+        <input class="input" id="kz-query" placeholder="Название фильма, например «Интерстеллар»" autocomplete="off">
+        <button class="btn primary" type="submit" id="kz-search-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          Найти
+        </button>
+        <button class="btn" type="button" id="kz-settings-btn" title="Настройки Kinozal">
+          <span class="kz-dot" id="kz-dot"></span> Kinozal
+        </button>
+      </form>
+
+      <div id="kz-setup" class="card kz-callout hidden">
+        <div>
+          <b>Подключите Kinozal</b>
+          <div class="muted">Укажите логин и пароль от kinozal.guru — поиск будет работать прямо отсюда.</div>
+        </div>
+        <button class="btn primary" type="button" id="kz-setup-btn">Подключить</button>
+      </div>
+
+      <div id="kz-results"></div>
+      <div id="kz-movie" class="hidden"></div>
     </section>
 
     <section id="view-files" class="hidden">
@@ -143,6 +168,29 @@
     </div>
     <div id="player-slot"></div>
     <div class="player-note" id="player-note">Если видео не воспроизводится (например, MKV с кодеком HEVC или звуком AC3/DTS) — откройте ссылку в VLC.</div>
+  </dialog>
+
+  <dialog id="kz-dlg">
+    <form class="dlg-body" id="kz-cfg-form">
+      <h3>Kinozal</h3>
+      <p id="kz-cfg-status">Не подключено</p>
+      <label class="field-label" for="kz-base">Адрес сайта</label>
+      <input class="input" id="kz-base" placeholder="https://kinozal.guru" autocomplete="off">
+      <label class="field-label" for="kz-user">Логин</label>
+      <input class="input" id="kz-user" autocomplete="off">
+      <label class="field-label" for="kz-pass">Пароль</label>
+      <input class="input" id="kz-pass" type="password" autocomplete="new-password">
+      <details class="kz-cookie">
+        <summary>Или войти через cookie</summary>
+        <p>Если вход по паролю не проходит: войдите на Kinozal в своём браузере, откройте DevTools (F12) → Application → Cookies → сайт Kinozal и скопируйте значения <b>uid</b> и <b>pass</b>.</p>
+        <input class="input" id="kz-cookies" placeholder="uid=1234567; pass=abcdef..." autocomplete="off" spellcheck="false">
+      </details>
+      <div class="dlg-actions">
+        <button class="btn danger" type="button" id="kz-forget">Забыть</button>
+        <button class="btn" type="button" id="kz-cancel">Отмена</button>
+        <button class="btn primary" type="submit" id="kz-save">Сохранить и войти</button>
+      </div>
+    </form>
   </dialog>
 
   <div class="toasts" id="toasts"></div>

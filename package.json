@@ -15,8 +15,10 @@
   },
   "dependencies": {
     "archiver": "^8.0.0",
+    "cheerio": "^1.2.0",
     "express": "^5.2.1",
     "parse-torrent": "^11.0.24",
+    "playwright-core": "^1.63.0",
     "webtorrent": "^3.0.21"
   },
   "devDependencies": {

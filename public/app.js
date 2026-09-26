@@ -126,7 +126,9 @@ function showTab (tab) {
   for (const b of document.querySelectorAll('.tab')) b.classList.toggle('active', b.dataset.tab === tab)
   $('#view-downloads').classList.toggle('hidden', tab !== 'downloads')
   $('#view-files').classList.toggle('hidden', tab !== 'files')
+  $('#view-search').classList.toggle('hidden', tab !== 'search')
   if (tab === 'files') loadFiles(currentPath)
+  if (tab === 'search') loadKinozalStatus()
   try { localStorage.setItem('tab', tab) } catch {}
 }
 
@@ -572,6 +574,246 @@ $('#player-link').addEventListener('click', () => {
   share(playing.path)
 })
 
+// ---------- kinozal search ----------
+
+let kz = null // status
+let kzMovies = []
+let kzMovie = null // { movie, releases }
+let kzSort = { key: 'score', dir: -1 }
+
+const loadingEl = text => h('div', { class: 'loading' }, h('div', { class: 'spinner' }), h('div', { text }))
+const kzLink = id => kz ? `${kz.baseUrl}/details.php?id=${encodeURIComponent(id)}` : '#'
+const resLabel = r => r ? (r === 2160 ? '4K' : `${r}p`) : null
+
+async function loadKinozalStatus () {
+  try {
+    kz = await api('GET', '/api/kinozal/status')
+  } catch {
+    return
+  }
+  $('#kz-setup').classList.toggle('hidden', kz.configured)
+  const dot = $('#kz-dot')
+  dot.classList.toggle('ok', kz.configured && kz.loggedIn)
+  dot.classList.toggle('bad', kz.configured && !kz.loggedIn)
+}
+
+function openKinozalSettings () {
+  const s = kz || { baseUrl: 'https://kinozal.guru' }
+  $('#kz-base').value = s.baseUrl || ''
+  $('#kz-user').value = s.username || ''
+  $('#kz-pass').value = ''
+  $('#kz-pass').placeholder = s.hasPassword ? 'Сохранён — оставьте пустым, чтобы не менять' : ''
+  $('#kz-cookies').value = ''
+  $('#kz-cfg-status').textContent = !s.configured
+    ? 'Не подключено'
+    : s.loggedIn
+      ? `Подключено${s.username ? ' как ' + s.username : ''}${s.mode === 'browser' ? ' (через встроенный браузер)' : ''}`
+      : 'Вход не выполнен — проверьте данные'
+  $('#kz-dlg').showModal()
+}
+
+$('#kz-settings-btn').addEventListener('click', openKinozalSettings)
+$('#kz-setup-btn').addEventListener('click', openKinozalSettings)
+$('#kz-cancel').addEventListener('click', () => $('#kz-dlg').close())
+
+$('#kz-cfg-form').addEventListener('submit', async e => {
+  e.preventDefault()
+  const btn = $('#kz-save')
+  btn.disabled = true
+  $('#kz-cfg-status').textContent = 'Вхожу на Kinozal… (первый раз может занять до минуты)'
+  const body = { baseUrl: $('#kz-base').value.trim() || 'https://kinozal.guru', username: $('#kz-user').value.trim() }
+  if ($('#kz-pass').value) body.password = $('#kz-pass').value
+  if ($('#kz-cookies').value.trim()) body.cookies = $('#kz-cookies').value.trim()
+  try {
+    kz = await api('PUT', '/api/kinozal/config', body)
+    toast('Kinozal подключён', 'ok')
+    $('#kz-dlg').close()
+  } catch (err) {
+    $('#kz-cfg-status').textContent = err.message
+  } finally {
+    btn.disabled = false
+    loadKinozalStatus()
+  }
+})
+
+$('#kz-forget').addEventListener('click', async () => {
+  await api('POST', '/api/kinozal/logout').catch(err => toast(err.message, 'error'))
+  $('#kz-dlg').close()
+  loadKinozalStatus()
+})
+
+$('#kz-form').addEventListener('submit', async e => {
+  e.preventDefault()
+  const q = $('#kz-query').value.trim()
+  if (!q) return
+  if (kz && !kz.configured) return openKinozalSettings()
+  showKzResults()
+  $('#kz-results').replaceChildren(loadingEl('Ищу на Kinozal…'))
+  $('#kz-search-btn').disabled = true
+  try {
+    const data = await api('GET', `/api/kinozal/search?q=${q_(q)}`)
+    kzMovies = data.movies
+    renderKzResults()
+  } catch (err) {
+    $('#kz-results').replaceChildren(h('div', { class: 'empty', text: err.message }))
+  } finally {
+    $('#kz-search-btn').disabled = false
+    loadKinozalStatus()
+  }
+})
+
+function q_ (s) { return encodeURIComponent(s) }
+
+function showKzResults () {
+  $('#kz-results').classList.remove('hidden')
+  $('#kz-movie').classList.add('hidden')
+}
+
+function renderKzResults () {
+  if (!kzMovies.length) {
+    $('#kz-results').replaceChildren(h('div', { class: 'empty', text: 'Ничего не найдено' }))
+    return
+  }
+  $('#kz-results').replaceChildren(h('div', { class: 'list' }, kzMovies.map(m => {
+    const b = m.best
+    return h('div', { class: 'card movie-card', onclick: () => openMovie(m) },
+      h('div', { class: 'movie-title', text: m.title }),
+      h('div', { class: 'movie-sub', text: [m.altTitles.join(' / '), m.year].filter(Boolean).join(' · ') }),
+      h('div', { class: 'chips' },
+        h('span', { class: 'chip', text: `${m.count} ${plural(m.count, 'раздача', 'раздачи', 'раздач')}` }),
+        h('span', { class: 'chip', text: `до ${m.maxSeeds} сидов` }),
+        m.resolutions.map(r => h('span', { class: 'chip res', text: resLabel(r) })),
+        m.hasGold ? h('span', { class: 'chip gold', text: '★ золотая' }) : null
+      ),
+      b ? h('div', { class: 'movie-sub', text: `Лучшая здесь: ${fmtBytes(b.size)} · ${resLabel(b.resolution) || '?'} · ${b.seeds} сидов` }) : null
+    )
+  })))
+}
+
+function plural (n, one, few, many) {
+  const m10 = n % 10
+  const m100 = n % 100
+  if (m10 === 1 && m100 !== 11) return one
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few
+  return many
+}
+
+async function openMovie (m) {
+  $('#kz-results').classList.add('hidden')
+  const view = $('#kz-movie')
+  view.classList.remove('hidden')
+  view.replaceChildren(backBtn(), loadingEl('Ищу все раздачи этого фильма…'))
+  window.scrollTo({ top: 0 })
+  const params = new URLSearchParams({ title: m.title, year: m.year || '' })
+  for (const a of m.altTitles) params.append('alt', a)
+  try {
+    kzMovie = await api('GET', `/api/kinozal/movie?${params}`)
+    kzSort = { key: 'score', dir: -1 }
+    renderMovie()
+  } catch (err) {
+    view.replaceChildren(backBtn(), h('div', { class: 'empty', text: err.message }))
+  }
+}
+
+function backBtn () {
+  return h('button', { class: 'btn ghost back-btn', text: '← К результатам', onclick: showKzResults })
+}
+
+async function kzDownload (r, mode, btn) {
+  if (btn) btn.disabled = true
+  try {
+    const t = await api('POST', '/api/kinozal/download', { id: r.id, name: r.name, mode })
+    toast(`Загрузка добавлена${t.via === 'magnet' ? ' (magnet)' : ' (.torrent)'}: ${t.name}`, 'ok')
+    refreshTorrents()
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    if (btn) btn.disabled = false
+  }
+}
+
+function releaseChips (r) {
+  return h('div', { class: 'chips' },
+    r.reasons.map(x => h('span', { class: `chip ${x === 'золотая' ? 'gold' : 'good'}`, text: x === 'золотая' ? '★ золотая' : x })),
+    r.warnings.map(x => h('span', { class: 'chip warn', text: x }))
+  )
+}
+
+function renderMovie () {
+  const { movie, releases } = kzMovie
+  const view = $('#kz-movie')
+  const best = releases[0]
+  const head = h('div', { class: 'movie-head' },
+    h('h2', { text: movie.title }),
+    h('div', { class: 'movie-sub', text: [movie.altTitles.join(' / '), movie.year, `${releases.length} ${plural(releases.length, 'раздача', 'раздачи', 'раздач')}`].filter(Boolean).join(' · ') })
+  )
+  if (!best) {
+    view.replaceChildren(backBtn(), head, h('div', { class: 'empty', text: 'Раздачи не найдены' }))
+    return
+  }
+
+  const dlBtn = h('button', { class: 'btn primary' }, icon('download'), 'Скачать')
+  dlBtn.addEventListener('click', () => kzDownload(best, 'magnet', dlBtn))
+  const torBtn = h('button', { class: 'btn', text: 'Через .torrent', title: 'Если magnet долго не стартует' })
+  torBtn.addEventListener('click', () => kzDownload(best, 'torrent', torBtn))
+
+  const bestCard = h('div', { class: 'card best-card' },
+    h('div', { class: 'best-label', text: 'Лучший вариант' }),
+    h('div', { class: 'best-name', text: best.name }),
+    h('div', { class: 'best-meta' },
+      h('b', { text: fmtBytes(best.size) }), ' · сиды ', h('b', { text: best.seeds }), ' · пиры ', h('b', { text: best.peers }),
+      best.date ? ` · ${best.date}` : ''
+    ),
+    releaseChips(best),
+    h('div', { class: 'best-actions' }, dlBtn, torBtn,
+      h('a', { href: kzLink(best.id), target: '_blank', rel: 'noopener noreferrer', text: 'Открыть на Kinozal ↗' }))
+  )
+
+  const cols = [
+    { key: 'gold', label: '★' },
+    { key: 'name', label: 'Раздача' },
+    { key: 'size', label: 'Размер', num: true },
+    { key: 'seeds', label: 'Сиды', num: true },
+    { key: 'peers', label: 'Пиры', num: true },
+    { key: 'score', label: 'Оценка', num: true }
+  ]
+  const sorted = [...releases].sort((a, b) => {
+    const k = kzSort.key
+    const av = a[k]
+    const bv = b[k]
+    const c = typeof av === 'string' ? av.localeCompare(bv) : (Number(av) - Number(bv))
+    return c * kzSort.dir
+  })
+  const table = h('table', { class: 'rel-table' },
+    h('thead', {}, h('tr', {}, cols.map(c => h('th', {
+      class: `${c.num ? 'num' : ''} ${kzSort.key === c.key ? 'sorted' : ''}`,
+      text: c.label + (kzSort.key === c.key ? (kzSort.dir < 0 ? ' ↓' : ' ↑') : ''),
+      onclick: () => {
+        kzSort = kzSort.key === c.key ? { key: c.key, dir: -kzSort.dir } : { key: c.key, dir: c.key === 'name' ? 1 : -1 }
+        renderMovie()
+      }
+    })), h('th', {}))),
+    h('tbody', {}, sorted.map(r => {
+      const b = iconBtn('download', 'Скачать', () => kzDownload(r, 'magnet', b))
+      return h('tr', { class: r === best ? 'is-best' : '' },
+        h('td', { class: 'gold-star', title: r.gold ? 'Золотая раздача' : '', text: r.gold ? '★' : '' }),
+        h('td', { class: 'rel-name' },
+          h('a', { href: kzLink(r.id), target: '_blank', rel: 'noopener noreferrer', text: r.name }),
+          r.resolution ? h('span', { class: 'chip res', text: resLabel(r.resolution) }) : null),
+        h('td', { class: 'num', 'data-label': 'Размер', text: fmtBytes(r.size) }),
+        h('td', { class: 'num seeds', 'data-label': 'Сиды', text: r.seeds }),
+        h('td', { class: 'num', 'data-label': 'Пиры', text: r.peers }),
+        h('td', { class: 'num', 'data-label': 'Оценка', text: Math.round(r.score) }),
+        h('td', { class: 'rel-actions' }, b)
+      )
+    }))
+  )
+
+  view.replaceChildren(backBtn(), head, bestCard,
+    h('div', { class: 'section-title' }, h('span', { text: 'Все варианты' })),
+    h('div', { class: 'card' }, table))
+}
+
 // ---------- misc ----------
 
 $('#logout').addEventListener('click', async () => {
@@ -588,7 +830,7 @@ for (const dlg of document.querySelectorAll('dialog')) {
 
 let initialTab = 'downloads'
 try { initialTab = localStorage.getItem('tab') || 'downloads' } catch {}
-showTab(initialTab === 'files' ? 'files' : 'downloads')
+showTab(['files', 'search'].includes(initialTab) ? initialTab : 'downloads')
 refreshTorrents()
 refreshDisk()
 setInterval(() => { if (!document.hidden) refreshTorrents() }, 1500)

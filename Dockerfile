@@ -9,7 +9,12 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:22-bookworm-slim
-ENV NODE_ENV=production
+# Chromium is only started on demand, to pass the browser check on Kinozal.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+ENV NODE_ENV=production \
+    CHROMIUM_PATH=/usr/bin/chromium
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
