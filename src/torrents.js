@@ -60,7 +60,7 @@ export class TorrentManager {
       peerId: clientPeerId(),
       userAgent: CLIENT_USER_AGENT,
       torrentPort: config.torrentPort,
-      dhtPort: config.torrentPort,
+      dhtPort: config.dhtPort,
       maxConns: config.maxConns,
       natUpnp: false,
       natPmp: false,

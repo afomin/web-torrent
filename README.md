@@ -26,7 +26,7 @@ cd web-torrent
 Скрипт установит Docker, спросит логин и пароль, откроет порты и запустит всё. Адрес будет вида
 `https://203-0-113-7.sslip.io` — это бесплатный домен, который указывает на ваш IP; он нужен, чтобы получить настоящий HTTPS-сертификат (по голому IP Let's Encrypt сертификат не выдаёт).
 
-Если у провайдера есть облачный фаервол (Oracle, Hetzner, AWS…), откройте в его панели: **TCP 80, TCP 443, TCP+UDP 51413**.
+Если у провайдера есть облачный фаервол (Oracle, Hetzner, AWS…), откройте в его панели: **TCP 80, TCP 443, TCP+UDP 51413, UDP 51414**.
 
 ### Управление
 
@@ -50,7 +50,8 @@ docker compose down             # остановить
 | `AUTH_PASSWORD_HASH` | — | Хэш пароля (`npm run hash-password`) |
 | `AUTH_PASSWORD` | — | Альтернатива: пароль открытым текстом |
 | `SESSION_DAYS` | `30` | Сколько дней помнить вход |
-| `TORRENT_PORT` | `51413` | Порт BitTorrent (TCP+UDP) |
+| `TORRENT_PORT` | `51413` | Порт BitTorrent: TCP + UDP (uTP) |
+| `DHT_PORT` | `TORRENT_PORT + 1` | Порт DHT, UDP. Должен отличаться от `TORRENT_PORT`: на UDP `TORRENT_PORT` уже слушает uTP |
 | `DOWNLOAD_LIMIT_KBPS` | `-1` | Ограничение скачивания, КБ/с |
 | `MAX_CONNS` | `100` | Максимум соединений на торрент |
 

@@ -51,6 +51,7 @@ AUTH_USERNAME=${USERNAME}
 AUTH_PASSWORD_HASH='${HASH}'
 SESSION_DAYS=30
 TORRENT_PORT=51413
+DHT_PORT=51414
 DOWNLOAD_LIMIT_KBPS=-1
 MAX_CONNS=100
 EOF
@@ -59,17 +60,18 @@ fi
 
 # ---------- firewall ----------
 if command -v ufw >/dev/null 2>&1; then
-  say "Opening firewall ports (22, 80, 443, 51413)"
+  say "Opening firewall ports (22, 80, 443, 51413 TCP+UDP, 51414 UDP)"
   ufw allow 22/tcp >/dev/null
   ufw allow 80/tcp >/dev/null
   ufw allow 443/tcp >/dev/null
   ufw allow 443/udp >/dev/null
   ufw allow 51413 >/dev/null
+  ufw allow 51414/udp >/dev/null
   ufw --force enable >/dev/null
 elif command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -q -- '-j REJECT'; then
   # Oracle Cloud Ubuntu images ship with a REJECT rule in iptables.
-  say "Opening iptables ports (80, 443, 51413)"
-  for rule in "-p tcp --dport 80" "-p tcp --dport 443" "-p udp --dport 443" "-p tcp --dport 51413" "-p udp --dport 51413"; do
+  say "Opening iptables ports (80, 443, 51413 TCP+UDP, 51414 UDP)"
+  for rule in "-p tcp --dport 80" "-p tcp --dport 443" "-p udp --dport 443" "-p tcp --dport 51413" "-p udp --dport 51413" "-p udp --dport 51414"; do
     # shellcheck disable=SC2086
     iptables -C INPUT $rule -j ACCEPT 2>/dev/null || iptables -I INPUT 5 $rule -j ACCEPT
   done
@@ -84,4 +86,4 @@ docker compose up -d --build
 DOMAIN="$(grep '^DOMAIN=' .env | cut -d= -f2-)"
 say "Done! Open https://${DOMAIN}"
 echo "The certificate is issued on the first visit (may take ~30s)."
-echo "If your provider has a cloud firewall (Oracle, AWS, Hetzner...), open TCP 80, 443 and TCP+UDP 51413 there too."
+echo "If your provider has a cloud firewall (Oracle, AWS, Hetzner...), open TCP 80, 443, TCP+UDP 51413 and UDP 51414 there too."
