@@ -6,8 +6,9 @@
 //   to the UI as a live screenshot the user can click on (see screenshot()/click()).
 import fs from 'node:fs'
 import path from 'node:path'
-import { decode, encodeURIComponent1251, formBody1251 } from './cp1251.js'
-import { parseSearch, parseDetails, parseInfoHash, isLoggedIn, loginError, isChallenge } from './parse.js'
+import { spawn } from 'node:child_process'
+import { decode, encode, encodeURIComponent1251, formBody1251 } from './cp1251.js'
+import { parseSearch, parseDetails, parseInfoHash, isLoggedIn, loginError, isChallenge, isSitePage } from './parse.js'
 import { sameMovie } from './score.js'
 
 export const MIRRORS = ['https://kinozal.guru', 'https://kinozal.me', 'https://kinozal.tv']
@@ -17,8 +18,7 @@ const PAGE_INTERVAL = 1000 // between page requests
 const ASSET_INTERVAL = 250 // between poster image requests
 const CACHE_MS = 10 * 60 * 1000
 const DETAILS_CACHE_MS = 6 * 60 * 60 * 1000
-const BROWSER_IDLE_MS = 10 * 60 * 1000
-const AUTO_PASS_MS = 20000 // how long to wait for a check to pass by itself
+const BROWSER_IDLE_MS = 30 * 60 * 1000
 const VIEWPORT = { width: 1000, height: 700 }
 
 export class KinozalError extends Error {
@@ -106,9 +106,30 @@ class FetchTransport {
   async close () {}
 }
 
+// A virtual display lets Chromium run with a real (non-headless) window: anti-bot checks
+// (Cloudflare Turnstile, DDoS-Guard) detect headless browsers and keep failing them.
+let xvfbDisplay = null
+async function ensureDisplay () {
+  if (process.env.DISPLAY) return process.env.DISPLAY
+  if (xvfbDisplay) return xvfbDisplay
+  if (process.env.KINOZAL_HEADFUL === '0') return null
+  const bin = ['/usr/bin/Xvfb', '/usr/local/bin/Xvfb'].find(p => fs.existsSync(p))
+  if (!bin) return null
+  const display = ':99'
+  const proc = spawn(bin, [display, '-screen', '0', '1280x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
+  proc.unref() // don't keep the app (or a test run) alive just for the display
+  proc.on('error', () => { xvfbDisplay = null })
+  proc.on('exit', () => { xvfbDisplay = null })
+  process.once('exit', () => proc.kill())
+  await new Promise(resolve => setTimeout(resolve, 700))
+  if (proc.exitCode !== null) return null
+  xvfbDisplay = display
+  return display
+}
+
 class BrowserTransport {
-  constructor ({ jar, executablePath, statePath, baseUrl }) {
-    Object.assign(this, { jar, executablePath, statePath, baseUrl })
+  constructor ({ jar, executablePath, statePath, baseUrl, debugDir }) {
+    Object.assign(this, { jar, executablePath, statePath, baseUrl, debugDir })
     this.browser = null
     this.context = null
     this.page = null
@@ -122,16 +143,31 @@ class BrowserTransport {
     this._touch()
     if (this.isOpen) return
     const { chromium } = await import('playwright-core')
-    this.browser = await chromium.launch({
+    const display = await ensureDisplay()
+    const t0 = Date.now()
+    const launch = headless => chromium.launch({
       executablePath: this.executablePath,
-      headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+      headless,
+      env: { ...process.env, ...(display ? { DISPLAY: display } : {}) },
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled',
+        `--window-size=${VIEWPORT.width},${VIEWPORT.height + 120}`]
     })
-    const major = this.browser.version().split('.')[0]
+    let headless = !display
+    try {
+      this.browser = await launch(headless)
+    } catch (err) {
+      if (headless) throw err
+      console.warn('[kinozal] headful Chromium failed, falling back to headless:', err.message)
+      headless = true
+      this.browser = await launch(true)
+    }
     let storageState
     try { storageState = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) } catch {}
+    const major = this.browser.version().split('.')[0]
     this.context = await this.browser.newContext({
-      userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+      // A real window already has a consistent user agent; only hide "HeadlessChrome" when headless.
+      ...(headless ? { userAgent: `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36` } : {}),
       locale: 'ru-RU',
       viewport: VIEWPORT,
       storageState
@@ -144,7 +180,7 @@ class BrowserTransport {
     const cookies = [...this.jar.cookies].map(([name, value]) => ({ name, value, domain: '.' + host, path: '/' }))
     if (cookies.length) await this.context.addCookies(cookies)
     this.page = await this.context.newPage()
-    await this.open(this.baseUrl + '/')
+    console.log(`[kinozal] Chromium ${this.browser.version()} started (${headless ? 'headless' : 'with virtual display'}) in ${Date.now() - t0} ms`)
   }
 
   _touch () {
@@ -153,36 +189,43 @@ class BrowserTransport {
     this.idleTimer.unref()
   }
 
-  async _pageIsChallenge () {
-    const html = await this.page.content().catch(() => '')
-    return isChallenge(200, html)
+  async _html () {
+    return this.page.content().catch(() => '')
+  }
+
+  /** A real Kinozal page is on screen (not a check/interstitial). */
+  async _onSitePage () {
+    const html = await this._html()
+    return isSitePage(html) && !isChallenge(200, html)
+  }
+
+  async _waitSite (ms) {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (await this._onSitePage()) return true
+      await this.page.waitForTimeout(700).catch(() => {})
+    }
+    return false
+  }
+
+  async _interactiveCheckVisible () {
+    if (this.page.frames().some(f => /challenges\.cloudflare\.com|captcha|turnstile/i.test(f.url()))) return true
+    const html = await this._html()
+    return /cf-turnstile|g-recaptcha|h-captcha|type="checkbox"|не робот|not a robot/i.test(html)
   }
 
   /**
-   * Navigate and wait until the browser check (if any) is passed. If it doesn't pass by itself,
-   * try ticking the checkbox once; if that doesn't help either, leave the page open for the
-   * user (CAPTCHA error) — they solve it through screenshot()/click().
+   * The current page is a check: give it a moment to pass by itself (JS checks), try ticking an
+   * obvious checkbox, otherwise leave it on screen for the user and throw CAPTCHA.
    */
-  async open (url) {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
-    if (await this._waitPass(AUTO_PASS_MS)) return
+  async _passCheck () {
+    const interactive = await this._interactiveCheckVisible()
+    if (await this._waitSite(interactive ? 2500 : 12000)) return
     await this._tryTick()
-    if (await this._waitPass(8000)) return
+    if (await this._waitSite(5000)) return
     this.challenge = true
+    this._dumpChallenge()
     throw captchaError()
-  }
-
-  async _waitPass (ms) {
-    const deadline = Date.now() + ms
-    while (Date.now() < deadline) {
-      if (!await this._pageIsChallenge()) {
-        this.challenge = false
-        await this._saveState()
-        return true
-      }
-      await this.page.waitForTimeout(1000)
-    }
-    return false
   }
 
   // Best effort: click a visible checkbox, including inside challenge iframes.
@@ -198,39 +241,107 @@ class BrowserTransport {
     }
   }
 
+  async _dumpChallenge () {
+    try {
+      fs.mkdirSync(this.debugDir, { recursive: true })
+      const stamp = Date.now()
+      fs.writeFileSync(path.join(this.debugDir, `check-${stamp}.html`), await this._html())
+      await this.page.screenshot({ path: path.join(this.debugDir, `check-${stamp}.jpg`), type: 'jpeg', quality: 60 })
+      console.log(`[kinozal] anti-bot check shown at ${this.page.url()} (saved to kinozal-debug/check-${stamp}.*)`)
+    } catch {}
+  }
+
   async _saveState () {
     const state = await this.context.storageState()
     fs.writeFileSync(this.statePath, JSON.stringify(state), { mode: 0o600 })
     for (const c of state.cookies) this.jar.cookies.set(c.name, c.value)
   }
 
-  async request (url, { method = 'GET', body, contentType } = {}, retried = false) {
-    await this._ensure()
-    if (this.challenge) {
-      if (await this._pageIsChallenge()) throw captchaError()
-      this.challenge = false
+  _result (html) {
+    // Pages are handed on as windows-1251 bytes, like the plain HTTP transport returns them.
+    return { status: 200, url: this.page.url(), server: null, type: 'text/html', buf: encode(html) }
+  }
+
+  /** Open a page the way a person would: a real navigation, not a background fetch. */
+  async _navigate (url) {
+    await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    if (!await this._onSitePage()) {
+      await this._passCheck()
+      // After the check the site may land on its front page instead of where we were going.
+      if (new URL(this.page.url()).pathname + new URL(this.page.url()).search !== new URL(url).pathname + new URL(url).search) {
+        await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 })
+        if (!await this._onSitePage()) await this._passCheck()
+      }
     }
-    const pageOrigin = new URL(this.page.url()).origin
-    let res
-    if (new URL(url).origin === pageOrigin) {
-      res = await this.page.evaluate(async ({ url, method, body, contentType }) => {
-        const r = await fetch(url, { method, body, headers: body ? { 'Content-Type': contentType } : {}, credentials: 'include' })
-        const bytes = new Uint8Array(await r.arrayBuffer())
-        let s = ''
-        for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
-        return { status: r.status, url: r.url, server: r.headers.get('server'), type: r.headers.get('content-type'), b64: btoa(s) }
-      }, { url, method, body, contentType })
+    await this._saveState()
+    return this._result(await this._html())
+  }
+
+  /** POST a form by submitting a real <form> from a site page (the browser encodes it as windows-1251). */
+  async _submitForm (url, fields) {
+    if (!this.page.url().startsWith(this.baseUrl) || !await this._onSitePage()) await this._navigate(this.baseUrl + '/')
+    await Promise.all([
+      this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+      this.page.evaluate(({ url, fields }) => {
+        const form = document.createElement('form')
+        form.method = 'post'
+        form.action = url
+        form.acceptCharset = 'windows-1251'
+        for (const [k, v] of Object.entries(fields)) {
+          const input = document.createElement('input')
+          input.type = 'hidden'
+          input.name = k
+          input.value = v
+          form.append(input)
+        }
+        document.body.append(form)
+        form.submit()
+      }, { url, fields })
+    ])
+    if (!await this._onSitePage()) await this._passCheck()
+    await this._saveState()
+    return this._result(await this._html())
+  }
+
+  /** Small resources (info hash fragment, images): fetched from inside the page, with its cookies. */
+  async _fetchInPage (url) {
+    return this.page.evaluate(async url => {
+      const r = await fetch(url, { credentials: 'include' })
+      const bytes = new Uint8Array(await r.arrayBuffer())
+      let s = ''
+      for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+      return { status: r.status, url: r.url, server: r.headers.get('server'), type: r.headers.get('content-type'), b64: btoa(s) }
+    }, url).then(res => {
       res.buf = Buffer.from(res.b64, 'base64')
       delete res.b64
+      return res
+    })
+  }
+
+  async request (url, { method = 'GET', fields, navigate = true } = {}) {
+    await this._ensure()
+    if (this.challenge) {
+      if (!await this._onSitePage()) throw captchaError()
+      this.challenge = false
+    }
+    const sameOrigin = new URL(url).origin === new URL(this.baseUrl).origin
+    if (method === 'POST') return this._submitForm(url, fields)
+    if (sameOrigin && navigate) return this._navigate(url)
+
+    if (!this.page.url().startsWith(this.baseUrl)) await this._navigate(this.baseUrl + '/')
+    let res
+    if (sameOrigin) {
+      res = await this._fetchInPage(url)
     } else {
       // Other subdomain (e.g. dl.): cross-origin fetch would be blocked by CORS, use the context's HTTP client.
-      const r = await this.context.request.fetch(url, { method, data: body, headers: body ? { 'Content-Type': contentType } : {}, maxRedirects: 5, timeout: 30000 })
+      const r = await this.context.request.fetch(url, { method: 'GET', maxRedirects: 5, timeout: 30000 })
       res = { status: r.status(), url: r.url(), server: r.headers().server, type: r.headers()['content-type'], buf: await r.body() }
     }
     const isHtml = !res.type || /html/i.test(res.type)
-    if (!retried && isHtml && isChallenge(res.status, decode(res.buf), { server: res.server })) {
-      await this.open(new URL(url).origin === pageOrigin && method === 'GET' ? url : this.baseUrl + '/')
-      return this.request(url, { method, body, contentType }, true)
+    if (isHtml && isChallenge(res.status, decode(res.buf), { server: res.server })) {
+      // Pass the check with a normal page visit, then try the resource again.
+      await this._navigate(this.baseUrl + '/')
+      res = sameOrigin ? await this._fetchInPage(url) : res
     }
     await this._saveState()
     return res
@@ -248,12 +359,14 @@ class BrowserTransport {
   async click (x, y) {
     if (!this.isOpen) return
     this._touch()
-    await this.page.mouse.click(x, y)
+    await this.page.mouse.move(x - 12, y - 8, { steps: 4 })
+    await this.page.mouse.click(x, y, { delay: 60 })
   }
 
+  /** Solved only once a real Kinozal page is showing — interstitials ("verifying…") don't count. */
   async checkSolved () {
     if (!this.isOpen) return true
-    if (await this._pageIsChallenge()) return false
+    if (!await this._onSitePage()) return false
     this.challenge = false
     await this._saveState()
     return true
@@ -294,7 +407,7 @@ export class KinozalClient {
     this.browserTransport?.close().catch(() => {})
     this.fetchTransport = new FetchTransport(this.jar)
     this.browserTransport = this.chromium
-      ? new BrowserTransport({ jar: this.jar, executablePath: this.chromium, statePath: this.browserStateFile, baseUrl: this.state.baseUrl })
+      ? new BrowserTransport({ jar: this.jar, executablePath: this.chromium, statePath: this.browserStateFile, baseUrl: this.state.baseUrl, debugDir: this.debugDir })
       : null
   }
 
@@ -364,10 +477,14 @@ export class KinozalClient {
       this.jar.cookies.set('uid', parsed.uid)
       this.jar.cookies.set('pass', parsed.pass)
     }
-    this.state.mode = 'fetch'
     this.state.loggedIn = false
     this.cache.clear()
-    this._resetTransports()
+    // Keep a running browser (and the check it may have just passed) unless the site changed.
+    if (this.browserTransport?.baseUrl !== this.state.baseUrl) this._resetTransports()
+    else if (cookies && this.browserTransport?.isOpen) {
+      const host = new URL(this.state.baseUrl).hostname
+      await this.browserTransport.context.addCookies(['uid', 'pass'].map(name => ({ name, value: this.jar.cookies.get(name), domain: '.' + host, path: '/' })))
+    }
     this._save()
     await this._pickMirror()
     await this.ensureLogin(true)
@@ -450,7 +567,7 @@ export class KinozalClient {
       if (!this.browserTransport) {
         throw new KinozalError('Сайт требует проверку браузера, а Chromium на сервере не найден. Используйте вход через cookie или образ Docker с Chromium.')
       }
-      console.log('[kinozal] browser check detected, switching to headless Chromium')
+      console.log('[kinozal] browser check detected, switching to Chromium')
       this.state.mode = 'browser'
       this._save()
       return this.browserTransport.request(url, opts)
@@ -495,9 +612,11 @@ export class KinozalClient {
       this._setLoggedIn(false)
       throw new KinozalError('Cookie устарели — вставьте новые или укажите пароль', 422)
     }
+    const fields = { username: this.state.username, password: this.state.password, returnto: '' }
     await this._request('/takelogin.php', {
       method: 'POST',
-      body: formBody1251({ username: this.state.username, password: this.state.password, returnto: '' }),
+      fields,
+      body: formBody1251(fields),
       contentType: 'application/x-www-form-urlencoded'
     })
     const home = await this._request('/')
@@ -591,7 +710,7 @@ export class KinozalClient {
     if (!d.poster) return null
     const siteHost = new URL(this.state.baseUrl).hostname
     const res = new URL(d.poster).hostname === siteHost
-      ? await this._request(d.poster, { priority: 0, asset: true })
+      ? await this._request(d.poster, { priority: 0, asset: true, navigate: false })
       : await this.fetchTransport.request(d.poster, { cookies: false })
     const type = sniffImage(res.buf)
     if (res.status !== 200 || !type) return null
@@ -602,7 +721,9 @@ export class KinozalClient {
 
   async infoHash (id) {
     if (!/^\d+$/.test(String(id))) throw new KinozalError('Bad id', 400)
-    const res = await this._page(`/get_srv_details.php?id=${id}&action=2`)
+    // A bare HTML fragment (no site menu), so no "logged in" check and no page navigation.
+    await this.ensureLogin()
+    const res = await this._request(`/get_srv_details.php?id=${id}&action=2`, { navigate: false })
     let hash = parseInfoHash(res.html)
     if (!hash) {
       const details = await this._page(`/details.php?id=${id}`)
@@ -622,7 +743,7 @@ export class KinozalClient {
     let lastHtml = ''
     for (const url of urls) {
       try {
-        const res = await this._request(url)
+        const res = await this._request(url, { navigate: false })
         if (res.buf[0] === 0x64 /* 'd' */ && res.buf.includes('4:info')) return res.buf
         lastHtml = res.html
       } catch (err) {

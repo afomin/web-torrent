@@ -31,13 +31,17 @@ const cookies = req => Object.fromEntries(String(req.headers.cookie || '').split
 const AUTO_CHECK = `<html><body>DDoS-Guard: проверка браузера...<script>
   setTimeout(() => { document.cookie = 'bot_ok=1; path=/'; location.reload() }, 300)</script></body></html>`
 // No <input>: the box is a plain div at a known spot, so only a real click at (500, 300) passes.
-const MANUAL_CHECK = `<html><body style="margin:0">
+const MANUAL_CHECK_TEMPLATE = `<html><body style="margin:0">
   <div style="position:absolute;left:0;top:0;width:1000px;text-align:center">Подтвердите, что вы не робот</div>
   <div id="box" style="position:absolute;left:480px;top:280px;width:40px;height:40px;border:2px solid #333"></div>
   <script>document.getElementById('box').addEventListener('click', () => {
-    document.cookie = 'bot_ok=1; path=/'; location.reload() })</script></body></html>`
+    // Like real checks: a "verifying…" interstitial first, the clearance cookie a bit later.
+    document.body.innerHTML = '<p>Секунду…</p>'
+    setTimeout(() => { document.cookie = 'bot_ok=1; path=/'; location.reload() }, SLOW_MS)
+  })</script></body></html>`
 
-export function startFakeKinozal ({ challenge = false } = {}) {
+export function startFakeKinozal ({ challenge = false, slowMs = 0 } = {}) {
+  const MANUAL_CHECK = MANUAL_CHECK_TEMPLATE.replace('SLOW_MS', String(slowMs))
   const log = []
   const server = http.createServer((req, res) => {
     let body = ''

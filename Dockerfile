@@ -9,9 +9,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:22-bookworm-slim
-# Chromium is only started on demand, to pass the browser check on Kinozal.
+# Chromium is only started on demand, to pass the browser check on Kinozal. Xvfb gives it a
+# virtual display so it runs as a normal (non-headless) browser, which anti-bot checks accept.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends chromium fonts-liberation ca-certificates \
+ && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     CHROMIUM_PATH=/usr/bin/chromium

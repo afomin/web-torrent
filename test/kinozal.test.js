@@ -212,7 +212,7 @@ describe('client behind an automatic browser check (headless Chromium)', () => {
 })
 
 describe('client behind an "I\'m not a robot" check', () => {
-  withClient({ challenge: 'manual' }, ctx => {
+  withClient({ challenge: 'manual', slowMs: 2000 }, ctx => {
     test('asks the user, replays their click, then works', { timeout: 120000 }, async t => {
       const { client } = ctx()
       if (!client.status().browserAvailable) return t.skip('no chromium')
@@ -225,8 +225,10 @@ describe('client behind an "I\'m not a robot" check', () => {
       await assert.rejects(client.captchaClick(5000, 10), /Bad coordinates/)
 
       await client.captchaClick(500, 300)
+      await new Promise(resolve => setTimeout(resolve, 500))
+      assert.equal(await client.captchaSolved(), false, 'a "verifying…" interstitial is not a pass')
       let solved = false
-      for (let i = 0; i < 20 && !solved; i++) {
+      for (let i = 0; i < 40 && !solved; i++) {
         await new Promise(resolve => setTimeout(resolve, 250))
         solved = await client.captchaSolved()
       }

@@ -841,6 +841,10 @@ $('#kz-form').addEventListener('submit', async e => {
   if (kz && !kz.configured) return openKinozalSettings()
   showKzResults()
   $('#kz-results').replaceChildren(loadingEl('Ищу на Kinozal…'))
+  const slow = setTimeout(() => {
+    const note = $('#kz-results .loading div:last-child')
+    if (note) note.textContent = 'Kinozal проверяет браузер на сервере — первый раз это может занять до минуты…'
+  }, 6000)
   $('#kz-search-btn').disabled = true
   try {
     const data = await kzCall(() => api('GET', `/api/kinozal/search?q=${q_(q)}`))
@@ -849,6 +853,7 @@ $('#kz-form').addEventListener('submit', async e => {
   } catch (err) {
     $('#kz-results').replaceChildren(h('div', { class: 'empty', text: err.message }))
   } finally {
+    clearTimeout(slow)
     $('#kz-search-btn').disabled = false
     loadKinozalStatus()
   }
@@ -856,14 +861,16 @@ $('#kz-form').addEventListener('submit', async e => {
 
 function q_ (s) { return encodeURIComponent(s) }
 
-/** Run a Kinozal API call; if the site wants "I'm not a robot", let the user solve it and retry once. */
+/** Run a Kinozal API call; if the site wants "I'm not a robot", let the user solve it and retry. */
 async function kzCall (fn) {
-  try {
-    return await fn()
-  } catch (err) {
-    if (err.code !== 'CAPTCHA') throw err
-    if (!await solveCaptcha()) throw new Error('Проверка «я не робот» не пройдена')
-    return fn()
+  // The site may ask more than once in a row (e.g. once for the page, once after login).
+  for (let round = 0; ; round++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (err.code !== 'CAPTCHA' || round >= 3) throw err
+      if (!await solveCaptcha()) throw new Error('Проверка «я не робот» не пройдена')
+    }
   }
 }
 
@@ -908,7 +915,7 @@ function solveCaptcha () {
       try {
         const r = await api('POST', '/api/kinozal/captcha/click', { x, y })
         if (r.solved) return finish(true)
-        $('#kz-captcha-note').textContent = 'Если галочка не сработала, нажмите ещё раз.'
+        $('#kz-captcha-note').textContent = 'Проверка идёт… Окно закроется само. Если через 10–15 секунд ничего не изменится, нажмите галочку ещё раз.'
       } catch (err) {
         $('#kz-captcha-note').textContent = err.message
       }

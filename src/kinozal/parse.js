@@ -190,13 +190,17 @@ export function loginError (html) {
   return red || null
 }
 
+/** A real Kinozal page: every one of them has the site menu or the login form. */
+export function isSitePage (html) {
+  return /href=["']?\/browse\.php|takelogin\.php|logout\.php/i.test(String(html))
+}
+
 /** Anti-bot pages: DDoS-Guard / Cloudflare "checking your browser", "I'm not a robot" checkboxes. */
 export function isChallenge (status, html, headers = {}) {
   const server = String(headers.server || '').toLowerCase()
   const text = String(html)
   // A real Kinozal page always has the site menu with the browse link.
-  const isSitePage = /href="\/browse\.php"|takelogin\.php|details\.php\?id=|get_srv_details|Инфо хеш/i.test(text)
-  if (isSitePage) return false
+  if (isSitePage(text) || /Инфо хеш/i.test(text)) return false
   if ((server.includes('ddos-guard') || server.includes('cloudflare')) && (status === 403 || status === 503 || status === 429)) return true
   return /ddos-guard|checking your browser|проверка браузера|проверяем ваш браузер|cf-browser-verification|challenge-platform|cf-turnstile|turnstile|captcha|не робот|just a moment|__ddg/i.test(text.slice(0, 50000))
 }
