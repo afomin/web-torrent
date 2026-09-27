@@ -4,6 +4,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import WebTorrent from 'webtorrent'
 import parseTorrent from 'parse-torrent'
+import bencode from 'bencode'
 import { config } from './config.js'
 import { uniqueName } from './files.js'
 
@@ -183,6 +184,7 @@ export class TorrentManager {
       throw new TorrentError('Пустой запрос')
     }
 
+    if (torrentBuf) torrentBuf = normalizeTorrentFile(torrentBuf)
     try {
       parsed = await parseTorrent(torrentBuf || magnetURI)
     } catch (err) {
@@ -608,6 +610,57 @@ async function moveInto (src, dst) {
     await fsp.cp(src, dst, { recursive: true })
     await fsp.rm(src, { recursive: true, force: true })
   }
+}
+
+const isBytes = v => ArrayBuffer.isView(v)
+
+/**
+ * Clean up fields outside the info dict that some trackers fill with junk. Kinozal, for one,
+ * sends "announce" as an empty dictionary and puts one into announce-list as well, which
+ * makes the torrent parser crash. The info dict (and so the info hash) is never touched.
+ */
+export function normalizeTorrentFile (buf) {
+  let t
+  try {
+    t = bencode.decode(buf)
+  } catch {
+    return buf // not bencode at all; the parser will explain
+  }
+  if (!t || typeof t !== 'object' || !t.info) return buf
+  let changed = false
+  const flatUrls = v => (Array.isArray(v) ? v.flatMap(flatUrls) : isBytes(v) && v.length ? [v] : [])
+
+  if ('announce-list' in t) {
+    const tiers = Array.isArray(t['announce-list']) ? t['announce-list'].map(flatUrls).filter(tier => tier.length) : []
+    const same = Array.isArray(t['announce-list']) && tiers.length === t['announce-list'].length &&
+      tiers.every((tier, i) => Array.isArray(t['announce-list'][i]) && tier.length === t['announce-list'][i].length)
+    if (!same) {
+      changed = true
+      if (tiers.length) t['announce-list'] = tiers
+      else delete t['announce-list']
+    }
+  }
+  if ('announce' in t && !(isBytes(t.announce) && t.announce.length)) {
+    changed = true
+    const first = t['announce-list']?.[0]?.[0]
+    if (first) t.announce = first
+    else delete t.announce
+  }
+  if ('url-list' in t && !isBytes(t['url-list'])) {
+    const urls = flatUrls(t['url-list'])
+    if (!Array.isArray(t['url-list']) || !t['url-list'].every(u => isBytes(u) && u.length)) {
+      changed = true
+      if (urls.length) t['url-list'] = urls
+      else delete t['url-list']
+    }
+  }
+  for (const k of ['created by', 'comment']) {
+    if (k in t && !isBytes(t[k])) {
+      changed = true
+      delete t[k]
+    }
+  }
+  return changed ? Buffer.from(bencode.encode(t)) : buf
 }
 
 function describeParseError (buf, err) {
