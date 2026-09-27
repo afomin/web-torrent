@@ -271,6 +271,7 @@ input[type=range]::-moz-range-thumb {
 .status-pill.paused { color: var(--muted); }
 .status-pill.error { color: var(--danger); background: rgba(255, 93, 108, .12); }
 .t-error { margin-top: 8px; color: var(--danger); font-size: 13px; }
+.t-warn { margin-top: 8px; color: var(--warn); font-size: 13px; word-break: break-word; }
 
 .history-item { padding: 12px 14px 12px 18px; display: flex; align-items: center; gap: 12px; }
 .history-item .check {

@@ -18,6 +18,17 @@ const PUBLIC_TRACKERS = [
   'udp://explodie.org:6969/announce'
 ]
 
+// Private trackers (Kinozal and others) only accept whitelisted clients, and WebTorrent's own
+// "-WW…-" peer id / user agent isn't on those lists. Present ourselves as qBittorrent instead.
+const CLIENT_PEER_PREFIX = '-qB4650-'
+const CLIENT_USER_AGENT = 'qBittorrent/4.6.5'
+
+function clientPeerId () {
+  const chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  const rnd = [...crypto.randomBytes(12)].map(b => chars[b % chars.length]).join('')
+  return Buffer.from(CLIENT_PEER_PREFIX + rnd, 'latin1').toString('hex')
+}
+
 const MAX_TORRENT_FILE = 10 * 1024 * 1024
 const HISTORY_LIMIT = 100
 
@@ -46,6 +57,8 @@ export class TorrentManager {
     this.history = []
 
     this.client = new WebTorrent({
+      peerId: clientPeerId(),
+      userAgent: CLIENT_USER_AGENT,
       torrentPort: config.torrentPort,
       dhtPort: config.torrentPort,
       maxConns: config.maxConns,
@@ -236,6 +249,15 @@ export class TorrentManager {
       entry.name = torrent.name
       entry.length = torrent.length
       this._save()
+    })
+    // Tracker replies such as "client not allowed" or "unregistered torrent" arrive as warnings.
+    torrent.on('warning', err => {
+      const msg = String(err?.message || err)
+      if (!/tracker|announce|failure|http|udp/i.test(msg)) return
+      if (entry.trackerMessage !== msg) {
+        console.warn(`[tracker ${entry.name}]`, msg)
+        entry.trackerMessage = msg
+      }
     })
     torrent.on('error', err => {
       console.error(`[torrent ${entry.name}]`, err.message)
@@ -518,6 +540,7 @@ export class TorrentManager {
       uploadSpeed: 0,
       peers: 0,
       timeRemaining: null,
+      trackerMessage: entry.trackerMessage || null,
       files: entry.files ? entry.files.length : null,
       selectedFiles: entry.selection ? entry.selection.length : null
     }

@@ -261,7 +261,11 @@ function renderTorrent (t) {
         h('span', { text: 'В торренте несколько файлов — отметьте, какие скачать.' }),
         h('button', { class: 'btn primary', text: 'Выбрать файлы', onclick: () => openFilePicker('torrent', t.id) }))
       : null,
-    t.error ? h('div', { class: 't-error', text: t.error }) : null
+    t.error ? h('div', { class: 't-error', text: t.error }) : null,
+    // Only worth showing while nothing is coming in.
+    t.trackerMessage && !t.peers && ['downloading', 'metadata'].includes(t.status)
+      ? h('div', { class: 't-warn', text: `Трекер: ${t.trackerMessage}` })
+      : null
   )
 }
 
