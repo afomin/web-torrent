@@ -22,10 +22,10 @@
           <span class="down" id="total-down">↓ 0 B/s</span>
           <span class="up" id="total-up">↑ 0 B/s</span>
         </div>
-        <div class="disk" title="Место на диске">
+        <button class="disk" id="disk-btn" type="button" title="Что занимает место">
           <span id="disk-text">—</span>
           <div class="disk-bar" id="disk-bar"><div></div></div>
-        </div>
+        </button>
       </div>
       <button class="icon-btn" id="logout" title="Выйти" aria-label="Выйти">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
@@ -201,6 +201,34 @@
       <p class="muted" id="kz-captcha-note"></p>
       <div class="dlg-actions">
         <button class="btn" type="button" id="kz-captcha-cancel">Отмена</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="files-dlg" class="files-dlg">
+    <div class="dlg-body">
+      <h3 id="files-title"></h3>
+      <div class="files-tools">
+        <button class="btn" type="button" data-pick="all">Все</button>
+        <button class="btn" type="button" data-pick="none">Ничего</button>
+        <button class="btn" type="button" data-pick="video">Только видео</button>
+        <input class="input" id="files-filter" placeholder="Фильтр по имени" autocomplete="off">
+      </div>
+      <div class="files-list" id="files-list"></div>
+      <div class="muted" id="files-summary"></div>
+      <div class="dlg-actions">
+        <button class="btn" type="button" id="files-cancel">Отмена</button>
+        <button class="btn primary" type="button" id="files-ok">Скачать выбранные</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="disk-dlg">
+    <div class="dlg-body">
+      <h3>Место на диске</h3>
+      <div id="disk-body"></div>
+      <div class="dlg-actions">
+        <button class="btn" type="button" id="disk-close">Закрыть</button>
       </div>
     </div>
   </dialog>

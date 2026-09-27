@@ -87,9 +87,46 @@ export async function remove (rel) {
   await fsp.rm(abs, { recursive: true, force: true })
 }
 
+/** Bytes actually allocated on disk (sparse files count only what's written). */
+async function allocated (p) {
+  let total = 0
+  let st
+  try { st = await fsp.lstat(p) } catch { return 0 }
+  if (st.isDirectory()) {
+    for (const name of await fsp.readdir(p)) total += await allocated(path.join(p, name))
+  } else if (st.isFile()) {
+    total += st.blocks * 512
+  }
+  return total
+}
+
+let breakdownCache = { at: 0, data: null }
+
 export async function diskUsage () {
   const s = await fsp.statfs(root)
-  return { total: s.blocks * s.bsize, free: s.bavail * s.bsize }
+  const total = s.blocks * s.bsize
+  const free = s.bavail * s.bsize
+  // What the app itself uses; the rest of "used" is the OS, Docker images/cache, swap, logs...
+  if (!breakdownCache.data || breakdownCache.at < Date.now() - 30000) {
+    const incomplete = await allocated(path.join(root, INCOMPLETE))
+    const downloads = (await allocated(root)) - incomplete
+    const appData = await allocated(config.dataDir)
+    breakdownCache = { at: Date.now(), data: { downloads, incomplete, appData } }
+  }
+  const { downloads, incomplete, appData } = breakdownCache.data
+  const used = total - free
+  // Root-reserved blocks (bfree - bavail) are neither free for us nor used by anything.
+  const reserved = (s.bfree - s.bavail) * s.bsize
+  return {
+    total,
+    free,
+    used,
+    downloads,
+    incomplete,
+    appData,
+    reserved,
+    other: Math.max(0, used - reserved - downloads - incomplete - appData)
+  }
 }
 
 /** Pick a name that doesn't exist yet in dir: "Movie", "Movie (2)", ... */

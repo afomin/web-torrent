@@ -94,7 +94,24 @@ test('invalid torrent input is rejected', async () => {
   assert.equal(r.status, 400)
 })
 
-test('downloads a torrent, stops it and moves files', { timeout: 60000 }, async () => {
+const json = (method, p, body) => req(p, { method, headers: { ...H, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) })
+
+async function waitFor (fn, what) {
+  for (let i = 0; i < 120; i++) {
+    const v = await fn()
+    if (v) return v
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+  throw new Error('timeout waiting for ' + what)
+}
+
+test('rejects a web page posing as .torrent with a clear message', async () => {
+  const r = await req('/api/torrents', { method: 'POST', headers: { ...H, 'Content-Type': 'application/x-bittorrent' }, body: Buffer.from('<!DOCTYPE html><html><body>Login</body></html>') })
+  assert.equal(r.status, 400)
+  assert.match((await r.json()).error, /веб-страница/)
+})
+
+test('multi-file torrent: choose files, then download more later', { timeout: 120000 }, async () => {
   const r = await req('/api/torrents', { method: 'POST', headers: { ...H, 'Content-Type': 'application/x-bittorrent' }, body: torrentBuf })
   assert.equal(r.status, 201)
   const added = await r.json()
@@ -103,22 +120,52 @@ test('downloads a torrent, stops it and moves files', { timeout: 60000 }, async 
   const dup = await req('/api/torrents', { method: 'POST', headers: { ...H, 'Content-Type': 'application/x-bittorrent' }, body: torrentBuf })
   assert.equal(dup.status, 409)
 
-  let data
-  for (let i = 0; i < 100; i++) {
-    data = await (await req('/api/torrents')).json()
-    if (data.history.length) break
-    await new Promise(resolve => setTimeout(resolve, 500))
-  }
+  // Waits for the user's choice instead of downloading everything.
+  await waitFor(async () => (await (await req('/api/torrents')).json()).torrents[0]?.status === 'select', 'select status')
+  const { files } = await (await req(`/api/torrents/${added.id}/files`)).json()
+  assert.deepEqual(files.map(f => f.path), ['My Movie/movie.mp4', 'My Movie/notes.txt'])
+  const movieIdx = files.find(f => f.path.endsWith('movie.mp4')).index
+  const notesIdx = files.find(f => f.path.endsWith('notes.txt')).index
+
+  assert.equal((await json('PUT', `/api/torrents/${added.id}/files`, { files: [] })).status, 400)
+  assert.equal((await json('PUT', `/api/torrents/${added.id}/files`, { files: [99] })).status, 400)
+  const sel = await json('PUT', `/api/torrents/${added.id}/files`, { files: [movieIdx] })
+  assert.equal(sel.status, 200)
+
+  let data = await waitFor(async () => { const d = await (await req('/api/torrents')).json(); return d.history.length && d }, 'first part')
   assert.equal(data.torrents.length, 0, 'torrent removed from active list')
-  assert.equal(data.history[0].name, 'My Movie')
-  assert.equal(data.history[0].path, 'My Movie')
-  // .torrent file cleaned up
-  assert.deepEqual(fs.readdirSync(path.join(tmp, 'data', 'torrents')), [])
+  const h = data.history[0]
+  assert.equal(h.name, 'My Movie')
+  assert.equal(h.path, 'My Movie')
+  assert.equal(h.canAddMore, true)
+  assert.deepEqual(h.doneFiles, [movieIdx])
+  let inner = await (await req('/api/files?path=' + encodeURIComponent('My Movie'))).json()
+  assert.deepEqual(inner.items.map(i => i.name), ['movie.mp4'], 'only the chosen file was moved')
+  assert.equal(fs.readdirSync(path.join(tmp, 'data', 'torrents')).length, 1, '.torrent kept to download more later')
+
+  // Download the rest into the same folder.
+  const hf = await (await req(`/api/history/${h.id}/files`)).json()
+  assert.equal(hf.files.find(f => f.index === movieIdx).previous, true)
+  assert.equal((await json('POST', `/api/history/${h.id}/files`, { files: [movieIdx] })).status, 400, 'already downloaded')
+  assert.equal((await json('POST', `/api/history/${h.id}/files`, { files: [notesIdx] })).status, 201)
+
+  data = await waitFor(async () => { const d = await (await req('/api/torrents')).json(); return d.history[0]?.canAddMore === false && d }, 'second part')
+  assert.equal(data.torrents.length, 0)
+  assert.equal(data.history.length, 1)
+  assert.deepEqual(data.history[0].doneFiles, [movieIdx, notesIdx].sort())
+  assert.deepEqual(fs.readdirSync(path.join(tmp, 'data', 'torrents')), [], '.torrent removed once everything is downloaded')
 
   const list = await (await req('/api/files')).json()
-  assert.deepEqual(list.items.map(i => i.name), ['My Movie'])
-  const inner = await (await req('/api/files?path=' + encodeURIComponent('My Movie'))).json()
+  assert.deepEqual(list.items.map(i => i.name), ['My Movie'], 'merged into the same folder')
+  inner = await (await req('/api/files?path=' + encodeURIComponent('My Movie'))).json()
   assert.deepEqual(inner.items.map(i => [i.name, i.kind]), [['movie.mp4', 'video'], ['notes.txt', 'file']])
+})
+
+test('disk usage breakdown', async () => {
+  const d = await (await req('/api/disk')).json()
+  for (const k of ['total', 'free', 'used', 'downloads', 'incomplete', 'appData', 'other']) assert.equal(typeof d[k], 'number', k)
+  assert.ok(d.downloads >= payload.length, 'downloads counted')
+  assert.ok(d.free + d.used === d.total)
 })
 
 test('file download, range streaming and zip', async () => {

@@ -116,6 +116,13 @@ app.delete('/api/torrents/:id', wrap(async (req, res) => res.json(await manager.
 app.get('/api/settings', (req, res) => res.json(manager.getSettings()))
 app.put('/api/settings', express.json({ limit: '4kb' }), (req, res) => res.json(manager.setSettings(req.body || {})))
 
+app.get('/api/torrents/:id/files', (req, res) => res.json(manager.files(req.params.id)))
+app.put('/api/torrents/:id/files', express.json({ limit: '256kb' }), (req, res) => res.json(manager.setFiles(req.params.id, req.body?.files)))
+app.get('/api/history/:id/files', (req, res) => res.json(manager.historyFiles(req.params.id)))
+app.post('/api/history/:id/files', express.json({ limit: '256kb' }), wrap(async (req, res) => {
+  res.status(201).json(await manager.addMoreFiles(req.params.id, req.body?.files))
+}))
+
 app.delete('/api/history/:id', (req, res) => { manager.clearHistory(req.params.id); res.json({ ok: true }) })
 app.delete('/api/history', (req, res) => { manager.clearHistory(); res.json({ ok: true }) })
 

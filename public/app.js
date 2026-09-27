@@ -216,7 +216,8 @@ const STATUS_LABEL = {
   paused: 'На паузе',
   error: 'Ошибка',
   finishing: 'Завершение',
-  active: 'Запуск'
+  active: 'Запуск',
+  select: 'Выберите файлы'
 }
 
 function renderTorrent (t) {
@@ -227,7 +228,9 @@ function renderTorrent (t) {
 
   const meta = []
   meta.push(h('span', { class: `status-pill ${t.status}`, text: STATUS_LABEL[t.status] || t.status }))
-  if (t.length) meta.push(h('span', {}, h('b', { text: `${pct.toFixed(1)}%` }), ` · ${fmtBytes(t.downloaded)} из ${fmtBytes(t.length)}`))
+  if (t.status === 'select') {
+    meta.push(h('span', { text: `${t.files} файлов · ${fmtBytes(t.length)}` }))
+  } else if (t.length) meta.push(h('span', {}, h('b', { text: `${pct.toFixed(1)}%` }), ` · ${fmtBytes(t.downloaded)} из ${fmtBytes(t.length)}`))
   if (t.status === 'downloading') {
     meta.push(h('span', {}, '↓ ', h('b', { text: fmtSpeed(t.downloadSpeed) })))
     meta.push(h('span', {}, '↑ ', fmtSpeed(t.uploadSpeed)))
@@ -235,6 +238,9 @@ function renderTorrent (t) {
     meta.push(h('span', {}, 'Осталось: ', h('b', { text: t.downloadSpeed > 0 ? fmtEta(t.timeRemaining) : '—' })))
   } else if (t.status === 'metadata') {
     meta.push(h('span', {}, 'Пиры: ', h('b', { text: t.peers })))
+  }
+  if (t.files > 1 && t.status !== 'select' && t.selectedFiles) {
+    meta.push(h('button', { class: 'link-btn', text: `Файлы: ${t.selectedFiles} из ${t.files}`, onclick: () => openFilePicker('torrent', t.id) }))
   }
 
   const actions = h('div', { class: 't-actions' },
@@ -250,6 +256,11 @@ function renderTorrent (t) {
     h('div', { class: 't-head' }, h('div', { class: 't-name', text: t.name }), actions),
     h('div', { class: 'progress' }, bar),
     h('div', { class: 't-meta' }, meta),
+    t.status === 'select'
+      ? h('div', { class: 't-select' },
+        h('span', { text: 'В торренте несколько файлов — отметьте, какие скачать.' }),
+        h('button', { class: 'btn primary', text: 'Выбрать файлы', onclick: () => openFilePicker('torrent', t.id) }))
+      : null,
     t.error ? h('div', { class: 't-error', text: t.error }) : null
   )
 }
@@ -259,8 +270,13 @@ function renderHistory (item) {
     h('div', { class: 'check' }, icon('check')),
     h('div', { class: 'h-body' },
       h('div', { class: 'h-name', text: item.name, title: item.name }),
-      h('div', { class: 'h-meta', text: `${fmtBytes(item.length)} · ${fmtDate(item.completedAt)}` })
+      h('div', { class: 'h-meta', text: [
+        fmtBytes(item.length),
+        item.files ? `${item.doneFiles.length} из ${item.files.length} файлов` : null,
+        fmtDate(item.completedAt)
+      ].filter(Boolean).join(' · ') })
     ),
+    item.canAddMore ? h('button', { class: 'btn', text: 'Докачать', title: 'Выбрать ещё файлы из этого торрента', onclick: () => openFilePicker('history', item.id) }) : null,
     iconBtn('open', 'Открыть в файлах', () => openInFiles(item)),
     iconBtn('x', 'Убрать из списка', async () => {
       await api('DELETE', `/api/history/${q(item.id)}`).catch(err => toast(err.message, 'error'))
@@ -320,6 +336,13 @@ async function refreshTorrents () {
 
   $('#history-section').classList.toggle('hidden', !data.history.length)
   $('#history-list').replaceChildren(...data.history.map(renderHistory))
+
+  for (const t of data.torrents) {
+    if (t.status === 'select' && !pickerShown.has(t.id) && currentTab === 'downloads' && !document.querySelector('dialog[open]')) {
+      pickerShown.add(t.id)
+      openFilePicker('torrent', t.id)
+    }
+  }
 
   const active = data.torrents.length
   $('#active-count').textContent = active
@@ -399,11 +422,166 @@ $('#seed-range').addEventListener('change', e => {
   saveSeeding({ uploadLimitKB: UPLOAD_STEPS[e.target.value] })
 })
 
+// ---------- file picker ----------
+
+const pickerShown = new Set()
+const VIDEO_RE = /\.(mkv|mp4|m4v|avi|mov|webm|ts|m2ts|wmv|mpg|mpeg)$/i
+let picker = null // { mode, id, files, selected:Set }
+
+async function openFilePicker (mode, id) {
+  let data
+  try {
+    data = await api('GET', mode === 'torrent' ? `/api/torrents/${q(id)}/files` : `/api/history/${q(id)}/files`)
+  } catch (err) {
+    return toast(err.message, 'error')
+  }
+  pickerShown.add(id)
+  picker = { mode, id, files: data.files, selected: new Set(data.files.filter(f => f.selected && !f.previous).map(f => f.index)) }
+  $('#files-title').textContent = data.name
+  $('#files-filter').value = ''
+  const status = mode === 'torrent' ? (await api('GET', '/api/torrents').catch(() => ({ torrents: [] }))).torrents.find(t => t.id === id)?.status : null
+  $('#files-ok').textContent = mode === 'history' ? 'Докачать выбранные' : status === 'select' ? 'Начать загрузку' : 'Сохранить выбор'
+  renderPicker()
+  $('#files-dlg').showModal()
+}
+
+function pickerRoot () {
+  // Common top folder (the torrent name) is not shown in every row.
+  const first = picker.files[0]?.path.split('/')[0]
+  return picker.files.every(f => f.path.startsWith(first + '/')) ? first + '/' : ''
+}
+
+function renderPicker () {
+  const root = pickerRoot()
+  const filter = $('#files-filter').value.trim().toLowerCase()
+  const rows = []
+  let lastDir = null
+  const files = [...picker.files].sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }))
+  for (const f of files) {
+    const rel = f.path.slice(root.length)
+    if (filter && !rel.toLowerCase().includes(filter)) continue
+    const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+    if (dir !== lastDir) {
+      lastDir = dir
+      if (dir) {
+        const inDir = files.filter(x => x.path.slice(root.length).startsWith(dir + '/') && !x.previous && (!filter || x.path.toLowerCase().includes(filter)))
+        const all = inDir.length && inDir.every(x => picker.selected.has(x.index))
+        const box = h('input', { type: 'checkbox' })
+        box.checked = !!all
+        box.addEventListener('change', () => {
+          for (const x of inDir) box.checked ? picker.selected.add(x.index) : picker.selected.delete(x.index)
+          renderPicker()
+        })
+        rows.push(h('label', { class: 'pick-dir' }, box, icon('folder'), h('span', { text: dir })))
+      }
+    }
+    const box = h('input', { type: 'checkbox' })
+    box.checked = f.previous || picker.selected.has(f.index)
+    box.disabled = f.previous || (f.done && picker.mode === 'torrent')
+    box.addEventListener('change', () => {
+      box.checked ? picker.selected.add(f.index) : picker.selected.delete(f.index)
+      renderPickerSummary()
+    })
+    const name = rel.slice(dir ? dir.length + 1 : 0)
+    let state = ''
+    if (f.previous) state = 'уже скачан'
+    else if (f.done) state = 'готово'
+    else if (f.downloaded) state = `${Math.floor(f.downloaded / (f.length || 1) * 100)}%`
+    rows.push(h('label', { class: `pick-file ${dir ? 'nested' : ''} ${f.previous ? 'prev' : ''}` },
+      box,
+      h('span', { class: 'pick-name', text: name, title: f.path }),
+      state ? h('span', { class: 'pick-state', text: state }) : null,
+      h('span', { class: 'pick-size', text: fmtBytes(f.length) })
+    ))
+  }
+  $('#files-list').replaceChildren(...(rows.length ? rows : [h('div', { class: 'muted', text: 'Ничего не найдено' })]))
+  renderPickerSummary()
+}
+
+function renderPickerSummary () {
+  const sel = picker.files.filter(f => picker.selected.has(f.index) && !f.previous)
+  const size = sel.reduce((a, f) => a + f.length, 0)
+  $('#files-summary').textContent = `Выбрано ${sel.length} из ${picker.files.length} · ${fmtBytes(size)}`
+  $('#files-ok').disabled = !sel.length
+}
+
+for (const b of document.querySelectorAll('[data-pick]')) {
+  b.addEventListener('click', () => {
+    const mode = b.dataset.pick
+    for (const f of picker.files) {
+      if (f.previous) continue
+      const on = mode === 'all' || (mode === 'video' && VIDEO_RE.test(f.path))
+      on ? picker.selected.add(f.index) : picker.selected.delete(f.index)
+    }
+    renderPicker()
+  })
+}
+$('#files-filter').addEventListener('input', () => renderPicker())
+$('#files-cancel').addEventListener('click', () => $('#files-dlg').close())
+$('#files-ok').addEventListener('click', async () => {
+  const files = [...picker.selected]
+  const btn = $('#files-ok')
+  btn.disabled = true
+  try {
+    if (picker.mode === 'torrent') {
+      await api('PUT', `/api/torrents/${q(picker.id)}/files`, { files })
+      toast('Выбор файлов сохранён', 'ok')
+    } else {
+      await api('POST', `/api/history/${q(picker.id)}/files`, { files })
+      toast('Докачка начата', 'ok')
+    }
+    $('#files-dlg').close()
+    refreshTorrents()
+  } catch (err) {
+    toast(err.message, 'error')
+  } finally {
+    btn.disabled = false
+  }
+})
+
 // ---------- disk ----------
+
+let lastDisk = null
+
+function showDiskDetails () {
+  const d = lastDisk
+  if (!d) return
+  const parts = [
+    { key: 'downloads', label: 'Загрузки', cls: 'seg-dl', hint: 'готовые файлы' },
+    { key: 'incomplete', label: 'Недокачанное', cls: 'seg-inc', hint: 'активные загрузки' },
+    { key: 'appData', label: 'Данные приложения', cls: 'seg-app', hint: 'настройки, постеры' },
+    { key: 'other', label: 'Система и прочее', cls: 'seg-sys', hint: 'ОС, Docker-образы и кэш сборки, файл подкачки, логи' },
+    { key: 'reserved', label: 'Зарезервировано', cls: 'seg-res', hint: 'резерв файловой системы для root' },
+    { key: 'free', label: 'Свободно', cls: 'seg-free', hint: '' }
+  ].filter(p => d[p.key] > 0)
+  const bar = h('div', { class: 'disk-stack' }, parts.map(p => {
+    const seg = h('div', { class: p.cls, title: `${p.label}: ${fmtBytes(d[p.key])}` })
+    seg.style.width = `${(d[p.key] / d.total * 100).toFixed(2)}%`
+    return seg
+  }))
+  const legend = h('div', { class: 'disk-legend' }, parts.map(p => h('div', { class: 'disk-row' },
+    h('span', { class: `dot ${p.cls}` }),
+    h('span', { class: 'disk-label' }, p.label, p.hint ? h('span', { class: 'muted', text: ` — ${p.hint}` }) : null),
+    h('b', { text: fmtBytes(d[p.key]) })
+  )))
+  $('#disk-body').replaceChildren(
+    h('p', { text: `Всего ${fmtBytes(d.total)}, свободно ${fmtBytes(d.free)}` }),
+    bar, legend,
+    d.other > 5 * 1024 ** 3
+      ? h('p', { class: 'muted disk-tip' }, 'Место под «Система и прочее» обычно съедают старые Docker-образы и кэш сборки после обновлений. Освободить: ',
+        h('code', { text: 'sudo docker system prune -af' }))
+      : null
+  )
+  $('#disk-dlg').showModal()
+}
+
+$('#disk-btn').addEventListener('click', showDiskDetails)
+$('#disk-close').addEventListener('click', () => $('#disk-dlg').close())
 
 async function refreshDisk () {
   try {
     const d = await api('GET', '/api/disk')
+    lastDisk = d
     const used = d.total - d.free
     const pct = d.total ? used / d.total : 0
     $('#disk-text').textContent = `Свободно ${fmtBytes(d.free)} из ${fmtBytes(d.total)}`
