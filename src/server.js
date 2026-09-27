@@ -105,9 +105,27 @@ app.post('/api/torrents',
   express.json({ limit: '64kb' }),
   express.raw({ type: 'application/x-bittorrent', limit: '10mb' }),
   wrap(async (req, res) => {
-    const input = Buffer.isBuffer(req.body) ? { torrentFile: req.body } : { magnet: req.body?.magnet }
+    let input = Buffer.isBuffer(req.body) ? { torrentFile: req.body } : { magnet: req.body?.magnet }
+    // A Kinozal page/download link is not a .torrent: resolve it through the Kinozal login.
+    const kzId = kinozalReleaseId(input.magnet)
+    if (kzId) {
+      const hash = await kinozal.infoHash(kzId)
+      input = hash ? { magnet: `magnet:?xt=urn:btih:${hash}` } : { torrentFile: await kinozal.torrentFile(kzId) }
+    }
     res.status(201).json(await manager.add(input))
   }))
+
+/** Release id from a Kinozal details/download link (any known mirror), else null. */
+function kinozalReleaseId (link) {
+  if (typeof link !== 'string') return null
+  let u
+  try { u = new URL(link.trim()) } catch { return null }
+  const host = u.host.replace(/^dl\./, '')
+  const known = /(^|\.)kinozal\.[a-z]+$/i.test(u.hostname) || kinozal.mirrors.some(m => new URL(m).host === host)
+  if (!known || !/\/(details|download)\.php$/.test(u.pathname)) return null
+  const id = u.searchParams.get('id')
+  return /^\d+$/.test(id || '') ? id : null
+}
 
 app.post('/api/torrents/:id/pause', wrap(async (req, res) => res.json(await manager.pause(req.params.id))))
 app.post('/api/torrents/:id/resume', (req, res) => res.json(manager.resume(req.params.id)))

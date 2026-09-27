@@ -9,6 +9,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import WebTorrent from 'webtorrent'
 import { Server as TrackerServer } from 'bittorrent-tracker'
+import { startFakeKinozal, hashFor } from './helpers/fake-kinozal.js'
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-e2e-'))
@@ -17,7 +18,7 @@ const BASE = `http://127.0.0.1:${PORT}`
 const PASSWORD = 'correct horse battery'
 const H = { 'X-Requested-With': 'web-torrent' }
 
-let tracker, seeder, server, torrentBuf, cookie
+let tracker, seeder, server, torrentBuf, cookie, fakeKinozal
 const payload = crypto.randomBytes(3 * 1024 * 1024 + 123)
 
 before(async () => {
@@ -34,6 +35,7 @@ before(async () => {
   const t = await new Promise(resolve => seeder.seed(seedDir, { announce: [announce] }, resolve))
   torrentBuf = t.torrentFile
 
+  fakeKinozal = await startFakeKinozal()
   server = spawn(process.execPath, ['src/server.js'], {
     cwd: root,
     env: {
@@ -43,7 +45,8 @@ before(async () => {
       DOWNLOADS_DIR: path.join(tmp, 'downloads'),
       AUTH_USERNAME: 'me',
       AUTH_PASSWORD: PASSWORD,
-      TORRENT_PORT: '0'
+      TORRENT_PORT: '0',
+      KINOZAL_MIRRORS: fakeKinozal.url
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -58,6 +61,7 @@ after(async () => {
   server?.kill('SIGTERM')
   await new Promise(resolve => seeder.destroy(resolve))
   await new Promise(resolve => tracker.close(resolve))
+  await fakeKinozal.close()
   fs.rmSync(tmp, { recursive: true, force: true })
 })
 
@@ -159,6 +163,15 @@ test('multi-file torrent: choose files, then download more later', { timeout: 12
   assert.deepEqual(list.items.map(i => i.name), ['My Movie'], 'merged into the same folder')
   inner = await (await req('/api/files?path=' + encodeURIComponent('My Movie'))).json()
   assert.deepEqual(inner.items.map(i => [i.name, i.kind]), [['movie.mp4', 'video'], ['notes.txt', 'file']])
+})
+
+test('a Kinozal release link is added via its info hash', async () => {
+  assert.equal((await json('PUT', '/api/kinozal/config', { cookies: 'uid=7; pass=good' })).status, 200)
+  const r = await json('POST', '/api/torrents', { magnet: `${fakeKinozal.url}/details.php?id=1322016` })
+  assert.equal(r.status, 201)
+  const t = await r.json()
+  assert.equal(t.infoHash, hashFor('1322016'))
+  assert.equal((await req(`/api/torrents/${t.id}`, { method: 'DELETE', headers: H })).status, 200)
 })
 
 test('disk usage breakdown', async () => {
