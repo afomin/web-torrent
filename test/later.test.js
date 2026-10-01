@@ -42,8 +42,13 @@ before(async () => {
   cookie = r.headers.get('set-cookie').split(';')[0]
 })
 
-after(() => {
-  server?.kill('SIGTERM')
+after(async () => {
+  // Wait for the server to finish saving its state before removing its folder.
+  if (server && server.exitCode === null) {
+    const exited = new Promise(resolve => server.once('exit', resolve))
+    server.kill('SIGTERM')
+    await exited
+  }
   fs.rmSync(tmp, { recursive: true, force: true })
 })
 
