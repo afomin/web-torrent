@@ -52,6 +52,8 @@ export const config = {
   // KB/s, -1 = unlimited. Seeding on/off and upload limit are set in the UI.
   downloadLimitKB: int('DOWNLOAD_LIMIT_KBPS', -1),
   maxConns: int('MAX_CONNS', 100),
+  // Space always kept free on the disk; downloads that don't fit ask to be postponed.
+  diskReserveBytes: int('DISK_RESERVE_MB', 1024) * 1024 * 1024,
   linkSecret: loadSecret()
 }
 

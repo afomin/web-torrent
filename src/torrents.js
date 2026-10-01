@@ -39,10 +39,18 @@ const DEFAULT_SETTINGS = { seeding: false, uploadLimitKB: 500 }
 const MIN_UPLOAD_KB = 10
 
 export class TorrentError extends Error {
-  constructor (msg, status = 400) {
+  constructor (msg, status = 400, code) {
     super(msg)
     this.status = status
+    if (code) this.code = code
   }
+}
+
+const fmtSize = n => {
+  n = Math.max(0, n)
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} ГБ`
+  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} МБ`
+  return `${Math.ceil(n / 1024)} КБ`
 }
 
 export class TorrentManager {
@@ -162,7 +170,11 @@ export class TorrentManager {
   /**
    * @param {{ magnet?: string, torrentFile?: Buffer }} input
    */
-  async add ({ magnet, torrentFile }) {
+  /**
+   * @param {{ magnet?: string, torrentFile?: Buffer, later?: boolean, force?: boolean }} input
+   *   later — keep it in "На потом" without downloading; force — start even if the disk looks too small
+   */
+  async add ({ magnet, torrentFile, later = false, force = false }) {
     let parsed
     let torrentBuf = null
     let magnetURI = null
@@ -197,6 +209,11 @@ export class TorrentManager {
       if (e.infoHash === parsed.infoHash) throw new TorrentError('Этот торрент уже добавлен', 409)
     }
 
+    // A .torrent already lists its files, so they can be chosen before anything is downloaded.
+    const files = parsed.files?.length ? parsed.files.map(f => ({ path: f.path.split(path.sep).join('/'), length: f.length })) : null
+    // Multi-file torrents get a space check once files are chosen; magnets have no size yet.
+    if (!later && files?.length === 1) await this._checkSpace(parsed.length, force)
+
     const id = crypto.randomBytes(8).toString('hex')
     const entry = {
       id,
@@ -205,20 +222,53 @@ export class TorrentManager {
       source: torrentBuf ? 'file' : 'magnet',
       magnet: magnetURI,
       addedAt: Date.now(),
-      status: 'active',
+      status: later ? 'later' : 'active',
       progress: 0,
       length: parsed.length || 0,
       downloaded: 0,
+      files,
       // null = the user hasn't chosen yet; multi-file torrents wait for a choice
-      selection: null
+      selection: files?.length === 1 ? [0] : null
     }
     if (torrentBuf) {
       await fsp.writeFile(path.join(config.torrentFilesDir, `${id}.torrent`), torrentBuf)
     }
     this.entries.set(id, entry)
     this._save()
-    this._start(entry)
+    if (!later) this._start(entry)
     return this._view(entry)
+  }
+
+  // ---------- disk space ----------
+
+  /** Free space minus what running downloads are still going to write. */
+  async freeSpace (exceptId) {
+    const st = await fsp.statfs(config.downloadsDir)
+    let free = st.bavail * st.bsize - config.diskReserveBytes
+    for (const e of this.entries.values()) {
+      if (e.id === exceptId || e.status !== 'active') continue
+      const p = this._progressOf(e, this.running.get(e.id)) || { length: e.length || 0, downloaded: e.downloaded || 0 }
+      free -= Math.max(0, p.length - p.downloaded)
+    }
+    return free
+  }
+
+  async _checkSpace (needed, force, exceptId) {
+    if (force || !needed) return
+    const free = await this.freeSpace(exceptId)
+    if (needed > free) {
+      throw new TorrentError(`Не хватает места: нужно ${fmtSize(needed)}, свободно ${fmtSize(free)}`, 409, 'NO_SPACE')
+    }
+  }
+
+  /** Bytes an entry still needs on disk (null when unknown, e.g. a magnet without metadata). */
+  _remaining (entry) {
+    if (entry.files && entry.selection) {
+      const len = entry.selection.reduce((a, i) => a + (entry.files[i]?.length || 0), 0)
+      return Math.max(0, len - (entry.downloaded || 0))
+    }
+    if (entry.files && entry.files.length > 1) return null // the user picks files first
+    return entry.length ? Math.max(0, entry.length - (entry.downloaded || 0)) : null
   }
 
   _start (entry) {
@@ -406,9 +456,20 @@ export class TorrentManager {
     return this._view(entry)
   }
 
-  resume (id) {
+  /** Stop and move to "На потом"; what was downloaded so far is kept. */
+  async postpone (id) {
+    const entry = this._get(id)
+    await this.pause(id)
+    entry.status = 'later'
+    this._save()
+    return this._view(entry)
+  }
+
+  /** Start/continue a paused or postponed torrent (with a disk space check unless forced). */
+  async resume (id, { force = false } = {}) {
     const entry = this._get(id)
     if (this.running.has(id)) return this._view(entry)
+    await this._checkSpace(this._remaining(entry), force, id)
     entry.status = entry.selection === null && entry.files?.length > 1 ? 'select' : 'active'
     this._save()
     this._start(entry)
@@ -453,11 +514,19 @@ export class TorrentManager {
     }
   }
 
-  setFiles (id, indices) {
+  async setFiles (id, indices, { force = false, later = false } = {}) {
     const entry = this._get(id)
-    if (!entry.files) throw new TorrentError('Список файлов ещё не получен — дождитесь метаданных', 409)
+    if (!entry.files) throw new TorrentError('Список файлов появится, когда торрент получит метаданные', 409)
     const sel = normalizeSelection(indices, entry.files.length).filter(i => !(entry.doneFiles || []).includes(i))
     if (!sel.length) throw new TorrentError('Выберите хотя бы один файл', 400)
+    if (later && entry.status !== 'later') {
+      entry.selection = sel
+      return this.postpone(id)
+    }
+    if (entry.status === 'select') {
+      const bytes = sel.reduce((a, i) => a + entry.files[i].length, 0)
+      await this._checkSpace(bytes, force, id)
+    }
     entry.selection = sel
     if (entry.status === 'select') entry.status = 'active'
     const t = this.running.get(id)
@@ -483,7 +552,7 @@ export class TorrentManager {
   }
 
   /** Start downloading more files of a finished torrent into the same folder. */
-  async addMoreFiles (id, indices) {
+  async addMoreFiles (id, indices, { later = false, force = false } = {}) {
     const h = this.history.find(x => x.id === id)
     if (!h?.canAddMore) throw new TorrentError('Для этой загрузки нельзя докачать файлы', 400)
     const sel = normalizeSelection(indices, h.files.length).filter(i => !h.doneFiles.includes(i))
@@ -491,6 +560,7 @@ export class TorrentManager {
     for (const e of this.entries.values()) {
       if (e.infoHash === h.infoHash) throw new TorrentError('Этот торрент уже качается', 409)
     }
+    if (!later) await this._checkSpace(sel.reduce((a, i) => a + h.files[i].length, 0), force)
     const entry = {
       id: h.id,
       infoHash: h.infoHash,
@@ -498,7 +568,7 @@ export class TorrentManager {
       source: h.source,
       magnet: h.magnet,
       addedAt: Date.now(),
-      status: 'active',
+      status: later ? 'later' : 'active',
       progress: 0,
       length: 0,
       downloaded: 0,
@@ -511,7 +581,7 @@ export class TorrentManager {
     this._saveHistory()
     this.entries.set(entry.id, entry)
     this._save()
-    this._start(entry)
+    if (!later) this._start(entry)
     return this._view(entry)
   }
 
@@ -547,6 +617,10 @@ export class TorrentManager {
       selectedFiles: entry.selection ? entry.selection.length : null
     }
     if (entry.finishing) v.status = 'finishing'
+    if (!t && entry.files && entry.selection) {
+      v.length = entry.selection.reduce((a, i) => a + (entry.files[i]?.length || 0), 0)
+      v.progress = v.length ? Math.min(1, v.downloaded / v.length) : 0
+    }
     if (t && !t.destroyed) {
       v.peers = t.numPeers
       v.downloadSpeed = t.downloadSpeed

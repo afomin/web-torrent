@@ -105,6 +105,9 @@ app.post('/api/torrents',
   express.json({ limit: '64kb' }),
   express.raw({ type: 'application/x-bittorrent', limit: '10mb' }),
   wrap(async (req, res) => {
+    // Flags come in the JSON body, or in the query string when the body is a .torrent file.
+    const flag = name => req.query[name] === '1' || (!Buffer.isBuffer(req.body) && req.body?.[name] === true)
+    const opts = { later: flag('later'), force: flag('force') }
     let input = Buffer.isBuffer(req.body) ? { torrentFile: req.body } : { magnet: req.body?.magnet }
     // A Kinozal page/download link is not a .torrent: resolve it through the Kinozal login.
     const kzId = kinozalReleaseId(input.magnet)
@@ -112,7 +115,7 @@ app.post('/api/torrents',
       const hash = await kinozal.infoHash(kzId)
       input = hash ? { magnet: `magnet:?xt=urn:btih:${hash}` } : { torrentFile: await kinozal.torrentFile(kzId) }
     }
-    res.status(201).json(await manager.add(input))
+    res.status(201).json(await manager.add({ ...input, ...opts }))
   }))
 
 /** Release id from a Kinozal details/download link (any known mirror), else null. */
@@ -128,17 +131,22 @@ function kinozalReleaseId (link) {
 }
 
 app.post('/api/torrents/:id/pause', wrap(async (req, res) => res.json(await manager.pause(req.params.id))))
-app.post('/api/torrents/:id/resume', (req, res) => res.json(manager.resume(req.params.id)))
+app.post('/api/torrents/:id/resume', express.json({ limit: '1kb' }), wrap(async (req, res) => {
+  res.json(await manager.resume(req.params.id, { force: req.body?.force === true }))
+}))
+app.post('/api/torrents/:id/later', wrap(async (req, res) => res.json(await manager.postpone(req.params.id))))
 app.delete('/api/torrents/:id', wrap(async (req, res) => res.json(await manager.remove(req.params.id))))
 
 app.get('/api/settings', (req, res) => res.json(manager.getSettings()))
 app.put('/api/settings', express.json({ limit: '4kb' }), (req, res) => res.json(manager.setSettings(req.body || {})))
 
 app.get('/api/torrents/:id/files', (req, res) => res.json(manager.files(req.params.id)))
-app.put('/api/torrents/:id/files', express.json({ limit: '256kb' }), (req, res) => res.json(manager.setFiles(req.params.id, req.body?.files)))
+app.put('/api/torrents/:id/files', express.json({ limit: '256kb' }), wrap(async (req, res) => {
+  res.json(await manager.setFiles(req.params.id, req.body?.files, { force: req.body?.force === true, later: req.body?.later === true }))
+}))
 app.get('/api/history/:id/files', (req, res) => res.json(manager.historyFiles(req.params.id)))
 app.post('/api/history/:id/files', express.json({ limit: '256kb' }), wrap(async (req, res) => {
-  res.status(201).json(await manager.addMoreFiles(req.params.id, req.body?.files))
+  res.status(201).json(await manager.addMoreFiles(req.params.id, req.body?.files, { force: req.body?.force === true, later: req.body?.later === true }))
 }))
 
 app.delete('/api/history/:id', (req, res) => { manager.clearHistory(req.params.id); res.json({ ok: true }) })
@@ -208,7 +216,7 @@ app.post('/api/kinozal/captcha/click', express.json({ limit: '1kb' }), wrap(asyn
 }))
 
 app.post('/api/kinozal/download', express.json({ limit: '8kb' }), wrap(async (req, res) => {
-  const { id, name, mode } = req.body || {}
+  const { id, name, mode, later, force } = req.body || {}
   let hash = null
   if (mode !== 'torrent') hash = await kinozal.infoHash(id)
   let input
@@ -217,7 +225,7 @@ app.post('/api/kinozal/download', express.json({ limit: '8kb' }), wrap(async (re
   } else {
     input = { torrentFile: await kinozal.torrentFile(id) }
   }
-  const t = await manager.add(input)
+  const t = await manager.add({ ...input, later: later === true, force: force === true })
   res.status(201).json({ ...t, via: hash ? 'magnet' : 'torrent' })
 }))
 

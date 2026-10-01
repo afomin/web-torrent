@@ -23,6 +23,7 @@ function h (tag, attrs = {}, ...children) {
 
 const ICONS = {
   pause: 'M8 5v14M16 5v14',
+  clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2',
   play: 'M7 4.5v15l12-7.5z',
   x: 'M18 6 6 18M6 6l12 12',
   trash: 'M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6M10 11v6M14 11v6',
@@ -121,6 +122,20 @@ function confirmDialog (title, text, okLabel = 'Удалить') {
 
 const q = p => encodeURIComponent(p)
 
+/** Dialog with custom buttons; resolves to the chosen value or null. */
+function choiceDialog (title, text, buttons) {
+  const dlg = $('#choice-dlg')
+  $('#choice-title').textContent = title
+  $('#choice-text').textContent = text
+  $('#choice-actions').replaceChildren(
+    h('button', { class: 'btn', value: '', text: 'Отмена' }),
+    ...buttons.map(b => h('button', { class: `btn ${b.primary ? 'primary' : ''}`, value: b.value, text: b.label }))
+  )
+  dlg.returnValue = ''
+  dlg.showModal()
+  return new Promise(resolve => dlg.addEventListener('close', () => resolve(dlg.returnValue || null), { once: true }))
+}
+
 // ---------- tabs ----------
 
 let currentTab = 'downloads'
@@ -140,12 +155,38 @@ for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', (
 
 // ---------- adding torrents ----------
 
+const addLater = () => $('#add-later').checked
+
+/**
+ * Run an action that may hit "not enough disk space" (code NO_SPACE): ask the user whether to
+ * put it in "На потом" or download anyway, then repeat it with { later } or { force }.
+ */
+async function withSpaceCheck (fn, opts = {}) {
+  try {
+    return await fn(opts)
+  } catch (err) {
+    if (err.code !== 'NO_SPACE') throw err
+    const choice = await choiceDialog('Не хватает места', `${err.message}. Отложить в «На потом» и скачать, когда освободится место?`, [
+      { value: 'later', label: 'Отложить', primary: true },
+      { value: 'force', label: 'Всё равно скачать' }
+    ])
+    if (!choice) return null
+    return fn({ [choice]: true })
+  }
+}
+
+function addedToast (t) {
+  if (!t) return
+  toast(t.status === 'later' ? `Отложено на потом: ${t.name}` : `Добавлено: ${t.name}`, 'ok')
+}
+
 async function addMagnet (magnet) {
   const btn = $('#add-btn')
   btn.disabled = true
   try {
-    const t = await api('POST', '/api/torrents', { magnet })
-    toast(`Добавлено: ${t.name}`, 'ok')
+    const t = await withSpaceCheck(o => api('POST', '/api/torrents', { magnet, ...o }), addLater() ? { later: true } : {})
+    if (!t) return
+    addedToast(t)
     $('#magnet').value = ''
     refreshTorrents()
   } catch (err) {
@@ -162,14 +203,22 @@ async function addFiles (files) {
       continue
     }
     try {
-      const t = await api('POST', '/api/torrents', f, { 'Content-Type': 'application/x-bittorrent' })
-      toast(`Добавлено: ${t.name}`, 'ok')
+      const t = await withSpaceCheck(o => {
+        const qs = new URLSearchParams(Object.entries(o).filter(([, v]) => v).map(([k]) => [k, '1']))
+        return api('POST', `/api/torrents${qs.size ? '?' + qs : ''}`, f, { 'Content-Type': 'application/x-bittorrent' })
+      }, addLater() ? { later: true } : {})
+      addedToast(t)
     } catch (err) {
       toast(`${f.name}: ${err.message}`, 'error')
     }
   }
   refreshTorrents()
 }
+
+try { $('#add-later').checked = localStorage.getItem('addLater') === '1' } catch {}
+$('#add-later').addEventListener('change', e => {
+  try { localStorage.setItem('addLater', e.target.checked ? '1' : '0') } catch {}
+})
 
 $('#add-form').addEventListener('submit', e => {
   e.preventDefault()
@@ -249,6 +298,7 @@ function renderTorrent (t) {
       : paused
         ? iconBtn('play', 'Продолжить', () => control(t.id, 'resume'))
         : iconBtn('pause', 'Пауза', () => control(t.id, 'pause')),
+    t.status === 'finishing' ? null : iconBtn('clock', 'Отложить на потом (скачанное сохранится)', () => control(t.id, 'later')),
     t.status === 'finishing' ? null : iconBtn('x', 'Отменить и удалить', () => cancelTorrent(t), 'danger')
   )
 
@@ -266,6 +316,25 @@ function renderTorrent (t) {
     t.trackerMessage && !t.peers && ['downloading', 'metadata'].includes(t.status)
       ? h('div', { class: 't-warn', text: `Трекер: ${t.trackerMessage}` })
       : null
+  )
+}
+
+function renderLater (t) {
+  const started = t.downloaded > 0
+  const meta = [
+    t.length ? (started ? `${fmtBytes(t.downloaded)} из ${fmtBytes(t.length)} уже скачано` : fmtBytes(t.length)) : 'размер станет известен после старта',
+    t.files > 1 ? `файлов: ${t.selectedFiles ?? 'все'} из ${t.files}` : null,
+    `добавлено ${fmtDate(t.addedAt)}`
+  ].filter(Boolean).join(' · ')
+  return h('div', { class: 'card history-item later-item' },
+    h('div', { class: 'check later' }, icon('clock')),
+    h('div', { class: 'h-body' },
+      h('div', { class: 'h-name', text: t.name, title: t.name }),
+      h('div', { class: 'h-meta', text: meta })
+    ),
+    t.files > 1 ? h('button', { class: 'btn', text: 'Файлы', title: 'Выбрать, что скачать', onclick: () => openFilePicker('torrent', t.id) }) : null,
+    h('button', { class: 'btn primary', text: 'Начать', onclick: () => control(t.id, 'resume') }),
+    iconBtn('x', 'Удалить', () => cancelTorrent(t), 'danger')
   )
 }
 
@@ -303,7 +372,9 @@ function openInFiles (item) {
 
 async function control (id, action) {
   try {
-    await api('POST', `/api/torrents/${q(id)}/${action}`)
+    if (action === 'resume') await withSpaceCheck(o => api('POST', `/api/torrents/${q(id)}/resume`, o.force ? { force: true } : {}))
+    else await api('POST', `/api/torrents/${q(id)}/${action}`)
+    if (action === 'later') toast('Отложено на потом')
     refreshTorrents()
   } catch (err) {
     toast(err.message, 'error')
@@ -331,12 +402,17 @@ async function refreshTorrents () {
   } catch {
     return
   }
+  const activeList = data.torrents.filter(t => t.status !== 'later')
+  const laterList = data.torrents.filter(t => t.status === 'later')
   const list = $('#torrent-list')
   list.replaceChildren(
-    ...(data.torrents.length
-      ? data.torrents.map(renderTorrent)
+    ...(activeList.length
+      ? activeList.map(renderTorrent)
       : [h('div', { class: 'empty' }, icon('inbox'), h('div', { text: 'Нет активных загрузок. Вставьте magnet-ссылку выше.' }))])
   )
+  $('#later-section').classList.toggle('hidden', !laterList.length)
+  $('#later-count').textContent = laterList.length ? `${laterList.length} · ${fmtBytes(laterList.reduce((a, t) => a + (t.length - t.downloaded), 0))}` : ''
+  $('#later-list').replaceChildren(...laterList.map(renderLater))
 
   $('#history-section').classList.toggle('hidden', !data.history.length)
   $('#history-list').replaceChildren(...data.history.map(renderHistory))
@@ -444,7 +520,10 @@ async function openFilePicker (mode, id) {
   $('#files-title').textContent = data.name
   $('#files-filter').value = ''
   const status = mode === 'torrent' ? (await api('GET', '/api/torrents').catch(() => ({ torrents: [] }))).torrents.find(t => t.id === id)?.status : null
+  picker.status = status
   $('#files-ok').textContent = mode === 'history' ? 'Докачать выбранные' : status === 'select' ? 'Начать загрузку' : 'Сохранить выбор'
+  // Starting now or later is a choice only when the download hasn't started yet.
+  $('#files-later').classList.toggle('hidden', !(mode === 'history' || status === 'select'))
   renderPicker()
   $('#files-dlg').showModal()
 }
@@ -522,18 +601,17 @@ for (const b of document.querySelectorAll('[data-pick]')) {
 }
 $('#files-filter').addEventListener('input', () => renderPicker())
 $('#files-cancel').addEventListener('click', () => $('#files-dlg').close())
-$('#files-ok').addEventListener('click', async () => {
+async function submitPicker (opts) {
   const files = [...picker.selected]
   const btn = $('#files-ok')
   btn.disabled = true
   try {
-    if (picker.mode === 'torrent') {
-      await api('PUT', `/api/torrents/${q(picker.id)}/files`, { files })
-      toast('Выбор файлов сохранён', 'ok')
-    } else {
-      await api('POST', `/api/history/${q(picker.id)}/files`, { files })
-      toast('Докачка начата', 'ok')
-    }
+    const send = o => picker.mode === 'torrent'
+      ? api('PUT', `/api/torrents/${q(picker.id)}/files`, { files, ...o })
+      : api('POST', `/api/history/${q(picker.id)}/files`, { files, ...o })
+    const t = await withSpaceCheck(send, opts)
+    if (!t) return
+    toast(t.status === 'later' ? 'Отложено на потом' : picker.mode === 'torrent' ? 'Выбор файлов сохранён' : 'Докачка начата', 'ok')
     $('#files-dlg').close()
     refreshTorrents()
   } catch (err) {
@@ -541,7 +619,9 @@ $('#files-ok').addEventListener('click', async () => {
   } finally {
     btn.disabled = false
   }
-})
+}
+$('#files-ok').addEventListener('click', () => submitPicker({}))
+$('#files-later').addEventListener('click', () => submitPicker({ later: true }))
 
 // ---------- disk ----------
 
@@ -1006,8 +1086,10 @@ function backBtn () {
 async function kzDownload (r, mode, btn) {
   if (btn) btn.disabled = true
   try {
-    const t = await kzCall(() => api('POST', '/api/kinozal/download', { id: r.id, name: r.name, mode }))
-    toast(`Загрузка добавлена${t.via === 'magnet' ? ' (magnet)' : ' (.torrent)'}: ${t.name}`, 'ok')
+    const later = mode === 'later'
+    const t = await withSpaceCheck(o => kzCall(() => api('POST', '/api/kinozal/download', { id: r.id, name: r.name, mode: later ? 'magnet' : mode, ...o })), later ? { later: true } : {})
+    if (!t) return
+    toast(t.status === 'later' ? `Отложено на потом: ${t.name}` : `Загрузка добавлена${t.via === 'magnet' ? ' (magnet)' : ' (.torrent)'}: ${t.name}`, 'ok')
     refreshTorrents()
   } catch (err) {
     toast(err.message, 'error')
@@ -1051,6 +1133,8 @@ function renderMovie () {
   dlBtn.addEventListener('click', () => kzDownload(best, 'magnet', dlBtn))
   const torBtn = h('button', { class: 'btn', text: 'Через .torrent', title: 'Если magnet долго не стартует' })
   torBtn.addEventListener('click', () => kzDownload(best, 'torrent', torBtn))
+  const laterBtn = h('button', { class: 'btn' }, icon('clock'), 'На потом')
+  laterBtn.addEventListener('click', () => kzDownload(best, 'later', laterBtn))
 
   const bestCard = h('div', { class: 'card best-card' },
     h('div', { class: 'best-label', text: 'Лучший вариант' }),
@@ -1060,7 +1144,7 @@ function renderMovie () {
       best.date ? ` · ${best.date}` : ''
     ),
     releaseChips(best),
-    h('div', { class: 'best-actions' }, dlBtn, torBtn,
+    h('div', { class: 'best-actions' }, dlBtn, laterBtn, torBtn,
       h('a', { href: kzLink(best.id), target: '_blank', rel: 'noopener noreferrer', text: 'Открыть на Kinozal ↗' }))
   )
 

@@ -53,6 +53,9 @@
           <span>или перетащите .torrent-файл в окно, или</span>
           <button class="link-btn" type="button" id="pick-file">выберите файл</button>
           <input type="file" id="file-input" accept=".torrent,application/x-bittorrent" multiple hidden>
+          <label class="later-toggle" title="Торрент сохранится в «На потом» и не начнёт качаться">
+            <input type="checkbox" id="add-later"> Скачать позже
+          </label>
         </div>
       </div>
 
@@ -77,6 +80,11 @@
 
       <div class="section-title"><span>Активные</span></div>
       <div class="list" id="torrent-list"></div>
+
+      <div id="later-section" class="hidden">
+        <div class="section-title"><span>На потом <span class="later-count" id="later-count"></span></span></div>
+        <div class="list" id="later-list"></div>
+      </div>
 
       <div id="history-section" class="hidden">
         <div class="section-title">
@@ -136,6 +144,14 @@
         <button class="btn" value="cancel">Отмена</button>
         <button class="btn solid-danger" value="ok" id="confirm-ok">Удалить</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="choice-dlg">
+    <form method="dialog" class="dlg-body">
+      <h3 id="choice-title"></h3>
+      <p id="choice-text"></p>
+      <div class="dlg-actions" id="choice-actions"></div>
     </form>
   </dialog>
 
@@ -218,6 +234,7 @@
       <div class="muted" id="files-summary"></div>
       <div class="dlg-actions">
         <button class="btn" type="button" id="files-cancel">Отмена</button>
+        <button class="btn hidden" type="button" id="files-later">На потом</button>
         <button class="btn primary" type="button" id="files-ok">Скачать выбранные</button>
       </div>
     </div>

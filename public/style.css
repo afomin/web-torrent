@@ -289,6 +289,14 @@ input[type=range]::-moz-range-thumb {
 }
 .empty svg { width: 40px; height: 40px; opacity: .5; margin-bottom: 8px; }
 
+/* ---------- later ---------- */
+
+.later-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text); }
+.later-toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+.history-item .check.later { background: rgba(109, 124, 255, .12); color: var(--accent); }
+.later-item { flex-wrap: wrap; }
+.later-count { margin-left: 6px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+
 /* ---------- file picker ---------- */
 
 .t-select {
