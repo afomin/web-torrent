@@ -157,12 +157,24 @@ test('multi-file torrent: choose files, then download more later', { timeout: 12
   assert.equal(data.torrents.length, 0)
   assert.equal(data.history.length, 1)
   assert.deepEqual(data.history[0].doneFiles, [movieIdx, notesIdx].sort())
-  assert.deepEqual(fs.readdirSync(path.join(tmp, 'data', 'torrents')), [], '.torrent removed once everything is downloaded')
+  assert.equal(fs.readdirSync(path.join(tmp, 'data', 'torrents')).length, 1, '.torrent kept while the item is in the list')
 
   const list = await (await req('/api/files')).json()
   assert.deepEqual(list.items.map(i => i.name), ['My Movie'], 'merged into the same folder')
   inner = await (await req('/api/files?path=' + encodeURIComponent('My Movie'))).json()
   assert.deepEqual(inner.items.map(i => [i.name, i.kind]), [['movie.mp4', 'video'], ['notes.txt', 'file']])
+
+  // A downloaded file deleted by mistake can be downloaded again.
+  assert.equal((await req('/api/files?path=' + encodeURIComponent('My Movie/notes.txt'), { method: 'DELETE', headers: H })).status, 200)
+  data = await (await req('/api/torrents')).json()
+  assert.equal(data.history[0].canAddMore, true, 'deleted file noticed')
+  assert.deepEqual(data.history[0].doneFiles, [movieIdx])
+  const again = await (await req(`/api/history/${h.id}/files`)).json()
+  assert.equal(again.files.find(f => f.index === notesIdx).previous, false)
+  assert.equal((await json('POST', `/api/history/${h.id}/files`, { files: [notesIdx] })).status, 201)
+  data = await waitFor(async () => { const d = await (await req('/api/torrents')).json(); return d.history[0]?.canAddMore === false && d }, 'download again')
+  inner = await (await req('/api/files?path=' + encodeURIComponent('My Movie'))).json()
+  assert.deepEqual(inner.items.map(i => i.name), ['movie.mp4', 'notes.txt'], 'restored in the same folder')
 })
 
 test('a Kinozal release link is added via its info hash', async () => {

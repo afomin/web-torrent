@@ -235,6 +235,7 @@ app.get('/api/files', wrap(async (req, res) => res.json(await listDir(String(req
 
 app.delete('/api/files', wrap(async (req, res) => {
   await remove(String(req.query.path || ''))
+  manager._syncHistory(true) // deleted files of a finished torrent can be downloaded again
   res.json({ ok: true })
 }))
 

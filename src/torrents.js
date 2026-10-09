@@ -408,9 +408,10 @@ export class TorrentManager {
 
     const doneFiles = [...new Set([...(entry.doneFiles || []), ...selection])].sort((a, b) => a - b)
     const complete = files.every((f, i) => f.length === 0 || doneFiles.includes(i))
-    // Keep the .torrent only while there are files left to download later.
+    // Folder torrents keep their .torrent while they are in the list: files may be downloaded later,
+    // or again after being deleted. Single files don't need it.
     const canAddMore = multi && !complete
-    if (!canAddMore) await fsp.rm(path.join(config.torrentFilesDir, `${entry.id}.torrent`), { force: true })
+    if (!multi) await fsp.rm(path.join(config.torrentFilesDir, `${entry.id}.torrent`), { force: true })
 
     this.entries.delete(entry.id)
     this._save()
@@ -427,8 +428,8 @@ export class TorrentManager {
       files: multi ? files : null,
       doneFiles: multi ? doneFiles : null,
       canAddMore,
-      source: canAddMore ? entry.source : undefined,
-      magnet: canAddMore ? entry.magnet : undefined
+      source: multi ? entry.source : undefined,
+      magnet: multi ? entry.magnet : undefined
     })
     this._saveHistory()
     console.log(`[done] ${entry.name} (${selection.length} of ${files.length} files)`)
@@ -539,9 +540,39 @@ export class TorrentManager {
   }
 
   /** Files of a finished multi-file torrent, to pick more of them later. */
+  /**
+   * "Already downloaded" is remembered when a download finishes; files deleted afterwards (in the
+   * app or by hand) must become available again. Returns true when the item changed.
+   */
+  _syncHistoryItem (h) {
+    if (!h.files || !h.doneFiles || !h.path) return false
+    const present = h.doneFiles.filter(i => {
+      const f = h.files[i]
+      if (!f) return false
+      if (f.length === 0) return true
+      const rel = f.path.split('/').slice(1).join('/')
+      return fs.existsSync(path.join(config.downloadsDir, h.path, rel))
+    })
+    const canAddMore = h.files.some((f, i) => f.length > 0 && !present.includes(i))
+    if (present.length === h.doneFiles.length && canAddMore === h.canAddMore) return false
+    h.doneFiles = present
+    h.length = present.reduce((a, i) => a + h.files[i].length, 0)
+    h.canAddMore = canAddMore
+    return true
+  }
+
+  _syncHistory (force = false) {
+    if (!force && this._historySyncedAt > Date.now() - 10000) return
+    this._historySyncedAt = Date.now()
+    let changed = false
+    for (const h of this.history) changed = this._syncHistoryItem(h) || changed
+    if (changed) this._saveHistory()
+  }
+
   historyFiles (id) {
     const h = this.history.find(x => x.id === id)
     if (!h?.files) throw new TorrentError('Нет списка файлов для этой загрузки', 404)
+    if (this._syncHistoryItem(h)) this._saveHistory()
     const done = new Set(h.doneFiles || [])
     return {
       id,
@@ -554,6 +585,7 @@ export class TorrentManager {
   /** Start downloading more files of a finished torrent into the same folder. */
   async addMoreFiles (id, indices, { later = false, force = false } = {}) {
     const h = this.history.find(x => x.id === id)
+    if (h && this._syncHistoryItem(h)) this._saveHistory()
     if (!h?.canAddMore) throw new TorrentError('Для этой загрузки нельзя докачать файлы', 400)
     const sel = normalizeSelection(indices, h.files.length).filter(i => !h.doneFiles.includes(i))
     if (!sel.length) throw new TorrentError('Выберите хотя бы один новый файл', 400)
@@ -561,12 +593,14 @@ export class TorrentManager {
       if (e.infoHash === h.infoHash) throw new TorrentError('Этот торрент уже качается', 409)
     }
     if (!later) await this._checkSpace(sel.reduce((a, i) => a + h.files[i].length, 0), force)
+    // Items finished by older versions may have lost their .torrent: fall back to a magnet by info hash.
+    const hasFile = h.source === 'file' && fs.existsSync(path.join(config.torrentFilesDir, `${h.id}.torrent`))
     const entry = {
       id: h.id,
       infoHash: h.infoHash,
       name: h.name,
-      source: h.source,
-      magnet: h.magnet,
+      source: hasFile ? 'file' : 'magnet',
+      magnet: hasFile ? null : (h.magnet || `magnet:?xt=urn:btih:${h.infoHash}`),
       addedAt: Date.now(),
       status: later ? 'later' : 'active',
       progress: 0,
@@ -588,7 +622,7 @@ export class TorrentManager {
   clearHistory (id) {
     const removed = id ? this.history.filter(h => h.id === id) : this.history
     for (const h of removed) {
-      if (h.canAddMore) fs.rmSync(path.join(config.torrentFilesDir, `${h.id}.torrent`), { force: true })
+      if (!this.entries.has(h.id)) fs.rmSync(path.join(config.torrentFilesDir, `${h.id}.torrent`), { force: true })
     }
     this.history = id ? this.history.filter(h => h.id !== id) : []
     this._saveHistory()
@@ -644,6 +678,7 @@ export class TorrentManager {
   }
 
   list () {
+    this._syncHistory()
     return {
       torrents: [...this.entries.values()].sort((a, b) => b.addedAt - a.addedAt).map(e => this._view(e)),
       history: this.history.slice(0, HISTORY_LIMIT),
